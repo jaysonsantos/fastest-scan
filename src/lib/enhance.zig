@@ -75,24 +75,24 @@ const Background = struct {
         return self.cells[(y * self.grid_width + x) * channels ..][0..channels];
     }
 
-    /// The background colour at a pixel, bilinear between the cell centers.
-    fn sample(self: Background, pixel_x: usize, pixel_y: usize) [channels]f32 {
+    /// The two cells around a pixel on one axis of the grid.
+    const Weight = struct {
+        first: usize,
+        second: usize,
+        /// The fraction of the way from the center of the first cell to the second one.
+        fraction: f32,
+    };
+
+    /// The cells around the pixel `pixel` on an axis with `cells` cells.
+    fn weight(self: Background, pixel: usize, cells: usize) Weight {
         const cell: f32 = @floatFromInt(self.cell_px);
-        const gx = std.math.clamp((@as(f32, @floatFromInt(pixel_x)) + 0.5) / cell - 0.5, 0, @as(f32, @floatFromInt(self.grid_width - 1)));
-        const gy = std.math.clamp((@as(f32, @floatFromInt(pixel_y)) + 0.5) / cell - 0.5, 0, @as(f32, @floatFromInt(self.grid_height - 1)));
-        const x0: usize = @intFromFloat(gx);
-        const y0: usize = @intFromFloat(gy);
-        const x1 = @min(x0 + 1, self.grid_width - 1);
-        const y1 = @min(y0 + 1, self.grid_height - 1);
-        const fx = gx - @as(f32, @floatFromInt(x0));
-        const fy = gy - @as(f32, @floatFromInt(y0));
-        var out: [channels]f32 = undefined;
-        for (0..channels) |channel| {
-            const top = self.at(x0, y0)[channel] * (1 - fx) + self.at(x1, y0)[channel] * fx;
-            const bottom = self.at(x0, y1)[channel] * (1 - fx) + self.at(x1, y1)[channel] * fx;
-            out[channel] = top * (1 - fy) + bottom * fy;
-        }
-        return out;
+        const position = std.math.clamp((@as(f32, @floatFromInt(pixel)) + 0.5) / cell - 0.5, 0, @as(f32, @floatFromInt(cells - 1)));
+        const first: usize = @intFromFloat(position);
+        return .{
+            .first = first,
+            .second = @min(first + 1, cells - 1),
+            .fraction = position - @as(f32, @floatFromInt(first)),
+        };
     }
 };
 
@@ -353,17 +353,39 @@ pub fn flatten(allocator: Allocator, page: RgbF32, options: Options) Allocator.E
     if (page.width == 0 or page.height == 0 or !options.flatten) return;
     const background = try estimateBackground(allocator, page, options);
     defer background.deinit(allocator);
+
+    // The paper colour of a pixel is bilinear between the cell centers, as in
+    // `Background.sample`. The weights of a column are the same in each row, and
+    // the mix of the two cell rows is the same for a whole pixel row.
+    const columns = try allocator.alloc(Background.Weight, page.width);
+    defer allocator.free(columns);
+    for (columns, 0..) |*weight, x| weight.* = background.weight(x, background.grid_width);
+    const row_paper = try allocator.alloc(Color, background.grid_width);
+    defer allocator.free(row_paper);
+
+    const lowest: Color = @splat(min_background);
+    const min_gain: Color = @splat(options.min_gain);
+    const max_gain: Color = @splat(options.max_gain);
+    const one: Color = @splat(1.0);
     for (0..page.height) |y| {
-        for (0..page.width) |x| {
-            const paper = background.sample(x, y);
+        const rows = background.weight(y, background.grid_height);
+        for (row_paper, 0..) |*paper, cell_x| {
+            const top: Color = background.at(cell_x, rows.first).*;
+            const bottom: Color = background.at(cell_x, rows.second).*;
+            paper.* = top + (bottom - top) * @as(Color, @splat(rows.fraction));
+        }
+        for (columns, 0..) |column, x| {
+            const left = row_paper[column.first];
+            const paper = left + (row_paper[column.second] - left) * @as(Color, @splat(column.fraction));
+            const gain = @min(@max(one / @max(paper, lowest), min_gain), max_gain);
             const pixel = page.pixel(x, y);
-            for (0..channels) |channel| {
-                const gain = std.math.clamp(1.0 / @max(paper[channel], min_background), options.min_gain, options.max_gain);
-                pixel[channel] *= gain;
-            }
+            pixel.* = @as(Color, pixel.*) * gain;
         }
     }
 }
+
+/// The three channels of a pixel, for arithmetic on all of them at a time.
+const Color = @Vector(channels, f32);
 
 /// Sharpen a flattened page and set its black and white levels, in place.
 pub fn finish(allocator: Allocator, page: RgbF32, options: Options) Allocator.Error!void {

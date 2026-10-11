@@ -647,12 +647,13 @@ fn findGutter(
     // The response at each band position: a dark line between brighter sides, or a
     // step of brightness. Text gives a response in places; the fold gives it
     // everywhere. The response is stored in steps of 1 / `response_steps_per_code`.
+    // The store is column after column: a candidate line is almost along a column,
+    // so the search below reads memory in order.
     const response = try allocator.alloc(u8, rows * columns);
     defer allocator.free(response);
     @memset(response, 0);
     for (0..rows) |row| {
         const band_row = band[row * columns ..][0..columns];
-        const response_row = response[row * columns ..][0..columns];
         for (probe..columns - probe) |column| {
             const before = band_row[column - probe];
             const after = band_row[column + probe];
@@ -660,7 +661,7 @@ fn findGutter(
             const valley = 0.5 * (before + after) - here;
             const step = @abs(after - before);
             const value = @min(@max(valley, 0) + gutter_step_weight * step, gutter_response_cap);
-            response_row[column] = @intFromFloat(value * response_steps_per_code);
+            response[column * rows + row] = @intFromFloat(value * response_steps_per_code);
         }
     }
 
@@ -680,7 +681,7 @@ fn findGutter(
                 const x = x_at_middle + slope * (@as(f32, @floatFromInt(row)) - middle_row);
                 const column_float = std.math.clamp(x - first_x, 0, @as(f32, @floatFromInt(columns - 1)));
                 const column: usize = @intFromFloat(@round(column_float));
-                bins[response[row * columns + column]] += 1;
+                bins[response[column * rows + row]] += 1;
             }
             // A low percentile: most of the length of the line must respond.
             var cumulative: u32 = 0;

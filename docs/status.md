@@ -29,9 +29,9 @@ zig-out/bin/fastest-scan ~/VID_20261009_180010.mp4 -o out/bench.pdf -v \
   --cache-dir .cache --debug-dir .cache/debug
 ```
 
-Result on 2026-10-11: 63 pages of 1292 x 1868 pixels, 13.2 MB. 63 pages is the
+Result on 2026-10-11: 63 pages of 1292 x 1868 pixels, 13.1 MB. 63 pages is the
 expected count: the cover and 31 spreads, in the order of the booklet. The run
-takes about 65 s with a warm frame cache. `docs/benchmark-log.md` has the numbers
+takes about 40 s with a warm frame cache. `docs/benchmark-log.md` has the numbers
 of each step.
 
 Each page comes from its own reference frame: the frame of the spread that shows
@@ -113,12 +113,14 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
      measures it around the region.
    - Fingers: done (decision 0014). What is left: skin numbers from more videos,
      and a thin strip of the desk at a page edge.
-5. **Speed.** The render pass takes most of the time: about 55 s of 65 s, and
-   about two times the CPU time of the state before decision 0013.
-   - Do not detect the pages two times in a frame that is a donor for the two
-     pages of a spread.
-   - `@Vector` code in the warp, the registration, and the flatten step. LLVM does
-     not vectorize loops in Zig 0.17.
+5. **Speed.** Done in a first form (decision 0015): about 40 s in place of 65 s.
+   A donor frame takes the page corners of the first pass, and the warp, the
+   registration, and the flatten step have vector code. The render pass takes
+   about 28 s of the 40 s. What is left:
+   - The page warp is about 40 % of the CPU time. The donors need the cubic only
+     in the regions that they repair: a cheap warp can give the cell values.
+   - Each render job gets fresh memory, which costs about 20 s of system time.
+     Keep one arena per worker and reset it.
    - Decode each range of frames one time for all of its donors, also with an
      empty cache. Hardware decode (`--ffmpeg /usr/bin/ffmpeg --hwaccel vaapi`).
    - A first pass on keyframes only.

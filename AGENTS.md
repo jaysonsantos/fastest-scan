@@ -38,6 +38,10 @@ Read `docs/status.md` first. It says what works, what does not, and what is next
 - Debug pictures: `--debug-dir DIR`. `faults/` shows what the fusion did in each
   cell, and `cover/` shows where the frames give no data. Add `--debug-layers` for
   the page of each frame before the fusion: the input for a prototype.
+- Profile: `nix shell --inputs-from . nixpkgs#perf --command perf record -g --
+  zig-out/bin/fastest-scan <video> -o out/perf.pdf --cache-dir .cache`, then
+  `perf report --no-children --sort symbol`. Compare the CPU time (`user` of
+  `time`), not the run time: the run time depends on the other work of the machine.
 - Release: `scripts/release.sh`, then `git push --follow-tags`.
 
 ## Rules

@@ -109,21 +109,35 @@ pub const ShiftGrid = struct {
         allocator.free(self.shifts);
     }
 
-    /// The shift at a position of the reference picture, bilinear between the tile centers.
-    pub fn sample(self: ShiftGrid, p: Point) Point {
+    /// The two tiles around a coordinate on one axis of the grid.
+    pub const AxisWeight = struct {
+        first: u32,
+        second: u32,
+        /// The fraction of the way from the center of the first tile to the second one.
+        fraction: f32,
+    };
+
+    /// The tiles around a coordinate of the reference picture, on an axis with
+    /// `tiles` tiles.
+    pub fn axisWeight(self: ShiftGrid, coordinate: f32, tiles: u32) AxisWeight {
         const tile: f32 = @floatFromInt(self.tile);
         const half = 0.5 * (tile - 1);
-        const gx = std.math.clamp((p.x - half) / tile, 0, @as(f32, @floatFromInt(self.tiles_wide - 1)));
-        const gy = std.math.clamp((p.y - half) / tile, 0, @as(f32, @floatFromInt(self.tiles_high - 1)));
-        const x0: usize = @intFromFloat(gx);
-        const y0: usize = @intFromFloat(gy);
-        const x1 = @min(x0 + 1, self.tiles_wide - 1);
-        const y1 = @min(y0 + 1, self.tiles_high - 1);
-        const fx = gx - @as(f32, @floatFromInt(x0));
-        const fy = gy - @as(f32, @floatFromInt(y0));
-        const top = self.shifts[y0 * self.tiles_wide + x0].lerp(self.shifts[y0 * self.tiles_wide + x1], fx);
-        const bottom = self.shifts[y1 * self.tiles_wide + x0].lerp(self.shifts[y1 * self.tiles_wide + x1], fx);
-        return top.lerp(bottom, fy);
+        const position = std.math.clamp((coordinate - half) / tile, 0, @as(f32, @floatFromInt(tiles - 1)));
+        const first: u32 = @intFromFloat(position);
+        return .{
+            .first = first,
+            .second = @min(first + 1, tiles - 1),
+            .fraction = position - @as(f32, @floatFromInt(first)),
+        };
+    }
+
+    /// The shift at a position of the reference picture, bilinear between the tile centers.
+    pub fn sample(self: ShiftGrid, p: Point) Point {
+        const x = self.axisWeight(p.x, self.tiles_wide);
+        const y = self.axisWeight(p.y, self.tiles_high);
+        const top = self.shifts[y.first * self.tiles_wide + x.first].lerp(self.shifts[y.first * self.tiles_wide + x.second], x.fraction);
+        const bottom = self.shifts[y.second * self.tiles_wide + x.first].lerp(self.shifts[y.second * self.tiles_wide + x.second], x.fraction);
+        return top.lerp(bottom, y.fraction);
     }
 };
 
@@ -174,18 +188,34 @@ fn correlate(
     const other_y: usize = @intCast(oy);
     if (other_x + side > other.width or other_y + side > other.height) return null;
 
+    // Sums of 8-bit values and of their products, some pixels at a time. A product
+    // is below 2^16, and a tile has far fewer than 2^16 pixels: 32 bits hold each sum.
+    var lane_other: Lanes = @splat(0);
+    var lane_other_squares: Lanes = @splat(0);
+    var lane_product: Lanes = @splat(0);
     var sum_other: u32 = 0;
     var sum_other_squares: u64 = 0;
     var sum_product: u64 = 0;
     for (0..side) |row| {
         const a = reference.data[(ry + row) * reference.stride + rx ..][0..side];
         const b = other.data[(other_y + row) * other.stride + other_x ..][0..side];
-        for (a, b) |value_a, value_b| {
+        var column: usize = 0;
+        while (column + lane_count <= side) : (column += lane_count) {
+            const wide_a: Lanes = @as(@Vector(lane_count, u8), a[column..][0..lane_count].*);
+            const wide_b: Lanes = @as(@Vector(lane_count, u8), b[column..][0..lane_count].*);
+            lane_other += wide_b;
+            lane_other_squares += wide_b * wide_b;
+            lane_product += wide_a * wide_b;
+        }
+        for (a[column..], b[column..]) |value_a, value_b| {
             sum_other += value_b;
             sum_other_squares += @as(u32, value_b) * value_b;
             sum_product += @as(u32, value_a) * value_b;
         }
     }
+    sum_other += @reduce(.Add, lane_other);
+    sum_other_squares += @reduce(.Add, @as(@Vector(lane_count, u64), lane_other_squares));
+    sum_product += @reduce(.Add, @as(@Vector(lane_count, u64), lane_product));
     const n: f64 = @floatFromInt(side * side);
     const mean_a = @as(f64, @floatFromInt(reference_stats.sum)) / n;
     const mean_b = @as(f64, @floatFromInt(sum_other)) / n;
@@ -198,6 +228,9 @@ fn correlate(
 
 /// A tile with a luma variance below this value has no structure at all.
 const flat_variance = 1.0;
+/// The number of pixels that the vector code of `correlate` takes at a time.
+const lane_count = 16;
+const Lanes = @Vector(lane_count, u32);
 
 // endregion: tile statistics
 

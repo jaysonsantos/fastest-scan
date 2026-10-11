@@ -178,9 +178,31 @@ fn isSet(mask: ?Plane, x: usize, y: usize) bool {
     return plane.at(x, y) != 0;
 }
 
-/// Find the cells with the colour of skin, and the cells that can be the halo of a
-/// finger. A cell without enough pixels inside the frame is none of the two.
-fn classifyCells(page: RgbF32, outside: ?Plane, grid: Grid, options: Options, skin: []bool, halo: []bool) void {
+/// The colour of each cell of a page: the input of `find`. One value per cell, row
+/// after row.
+pub const CellColors = struct {
+    /// The mean colour of the cell.
+    mean: [][channels]f32,
+    /// The largest minus the smallest luma of the cell. NaN for a cell without
+    /// enough pixels inside the frame.
+    contrast: []f32,
+
+    pub fn init(allocator: Allocator, grid: Grid) Allocator.Error!CellColors {
+        const mean = try allocator.alloc([channels]f32, grid.count());
+        errdefer allocator.free(mean);
+        return .{ .mean = mean, .contrast = try allocator.alloc(f32, grid.count()) };
+    }
+
+    pub fn deinit(self: CellColors, allocator: Allocator) void {
+        allocator.free(self.mean);
+        allocator.free(self.contrast);
+    }
+};
+
+/// Measure the colour of each cell of a flattened page. `outside` has a value that
+/// is not zero for each pixel outside the frame.
+pub fn measure(allocator: Allocator, page: RgbF32, outside: ?Plane, grid: Grid) Allocator.Error!CellColors {
+    const colors = try CellColors.init(allocator, grid);
     for (0..grid.height) |cell_y| {
         for (0..grid.width) |cell_x| {
             const x_start = cell_x * grid.cell;
@@ -204,19 +226,20 @@ fn classifyCells(page: RgbF32, outside: ?Plane, grid: Grid, options: Options, sk
             }
             const total: f32 = @floatFromInt((x_end - x_start) * (y_end - y_start));
             const index = cell_y * grid.width + cell_x;
-            skin[index] = false;
-            halo[index] = false;
-            if (inside < min_inside_fraction * total or inside == 0) continue;
-            const mean: [channels]f32 = .{ sum[0] / inside, sum[1] / inside, sum[2] / inside };
-            const contrast = brightest - darkest;
-            skin[index] = isSkin(mean, contrast, options);
-            halo[index] = isHalo(mean, contrast, options);
+            if (inside < min_inside_fraction * total or inside == 0) {
+                colors.mean[index] = @splat(0);
+                colors.contrast[index] = std.math.nan(f32);
+                continue;
+            }
+            colors.mean[index] = .{ sum[0] / inside, sum[1] / inside, sum[2] / inside };
+            colors.contrast[index] = brightest - darkest;
         }
     }
+    return colors;
 }
 
 /// True for the mean colour of a cell that shows skin. `contrast` is the largest
-/// minus the smallest luma of the cell.
+/// minus the smallest luma of the cell; with NaN the result is false.
 fn isSkin(mean: [channels]f32, contrast: f32, options: Options) bool {
     const red_over_green = mean[0] - mean[1];
     const green_over_blue = mean[1] - mean[2];
@@ -330,13 +353,12 @@ fn keepBorderConnected(allocator: Allocator, mask: []bool, no_data: []const bool
     @memcpy(mask, marked);
 }
 
-/// Find the fingers on a flattened page. `outside` has a value that is not zero for
-/// each pixel outside the frame. `no_data` is true for each cell where the frame
-/// does not show the page; a finger can come in from there too.
+/// Find the fingers on a flattened page from the colours of its cells. `no_data` is
+/// true for each cell where the frame does not show the page; a finger can come in
+/// from there too.
 pub fn find(
     allocator: Allocator,
-    page: RgbF32,
-    outside: ?Plane,
+    colors: CellColors,
     no_data: []const bool,
     grid: Grid,
     options: Options,
@@ -353,10 +375,9 @@ pub fn find(
     const scratch = try allocator.alloc(bool, count);
     defer allocator.free(scratch);
 
-    classifyCells(page, outside, grid, options, skin, halo);
-    for (skin, halo, no_data) |*is_skin, *is_halo, missing| {
-        is_skin.* = is_skin.* and !missing;
-        is_halo.* = is_halo.* and !missing;
+    for (skin, halo, colors.mean, colors.contrast, no_data) |*is_skin, *is_halo, mean, contrast, missing| {
+        is_skin.* = !missing and isSkin(mean, contrast, options);
+        is_halo.* = !missing and isHalo(mean, contrast, options);
     }
 
     // The wide parts. A cell without data counts as skin here, so a finger keeps
@@ -794,7 +815,9 @@ fn testFind(page: RgbF32, outside: ?Plane) !Mask {
         const y = (index / grid.width) * test_cell;
         missing.* = isSet(outside, x, y);
     }
-    return find(testing.allocator, page, outside, no_data, grid, .{});
+    const colors = try measure(testing.allocator, page, outside, grid);
+    defer colors.deinit(testing.allocator);
+    return find(testing.allocator, colors, no_data, grid, .{});
 }
 
 fn cellAt(page: RgbF32, x: usize, y: usize) usize {

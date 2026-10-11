@@ -204,41 +204,68 @@ const CellGrid = struct {
     }
 };
 
-const CellStatistic = enum {
-    /// The mean luma of the cell.
-    mean,
-    /// The mean of the darkest pixels of the cell: the ink value.
-    ink,
-};
-
 /// The number of darkest pixels of a cell that give its ink value.
 const ink_pixels = 4;
 
-/// One value per cell of a layer. A cell with too many pixels outside the frame
-/// gets NaN.
-fn cellLuma(allocator: Allocator, layer: Layer, cell: usize, grid_width: usize, grid_height: usize, statistic: CellStatistic) Allocator.Error![]f32 {
-    const out = try allocator.alloc(f32, grid_width * grid_height);
+/// What one layer shows in each cell, from one pass over its pixels. One value per
+/// cell, row after row.
+const LayerCells = struct {
+    /// The ink value: the mean of the darkest pixels. NaN for a cell without data.
+    ink: []f32,
+    /// The mean luma. NaN for a cell without data.
+    mean: []f32,
+    /// The tint: the mean red minus the mean blue. Paper and black ink are near
+    /// zero. NaN for a cell without data.
+    tint: []f32,
+    /// The colours for the finger mask.
+    colors: finger.CellColors,
+
+    fn deinit(self: LayerCells, allocator: Allocator) void {
+        allocator.free(self.ink);
+        allocator.free(self.mean);
+        allocator.free(self.tint);
+        self.colors.deinit(allocator);
+    }
+};
+
+/// The three channels of a pixel, for arithmetic on all of them at a time.
+const Color = @Vector(channels, f32);
+
+/// Measure each cell of a layer. A cell with too many pixels outside the frame has
+/// no data.
+fn measureLayer(allocator: Allocator, layer: Layer, grid: finger.Grid) Allocator.Error!LayerCells {
+    const count = grid.count();
+    const ink = try allocator.alloc(f32, count);
+    errdefer allocator.free(ink);
+    const mean = try allocator.alloc(f32, count);
+    errdefer allocator.free(mean);
+    const tint = try allocator.alloc(f32, count);
+    errdefer allocator.free(tint);
+    const colors = try finger.CellColors.init(allocator, grid);
     const page = layer.page;
-    for (0..grid_height) |cell_y| {
-        for (0..grid_width) |cell_x| {
-            const x_start = cell_x * cell;
-            const y_start = cell_y * cell;
-            const x_end = @min(x_start + cell, page.width);
-            const y_end = @min(y_start + cell, page.height);
-            var sum: f32 = 0;
+    const red = 0;
+    const blue = 2;
+    for (0..grid.height) |cell_y| {
+        for (0..grid.width) |cell_x| {
+            const x_start = cell_x * grid.cell;
+            const y_start = cell_y * grid.cell;
+            const x_end = @min(x_start + grid.cell, page.width);
+            const y_end = @min(y_start + grid.cell, page.height);
+            var sum: Color = @splat(0);
+            var brightest = -std.math.inf(f32);
             var inside: f32 = 0;
-            var total: f32 = 0;
             // The darkest values so far, in rising order.
             var darkest: [ink_pixels]f32 = @splat(std.math.inf(f32));
             for (y_start..y_end) |y| {
                 for (x_start..x_end) |x| {
-                    total += 1;
                     if (layer.outside) |mask| {
                         if (mask.at(x, y) != 0) continue;
                     }
-                    const luma = color.rgbLuma(page.pixel(x, y).*);
-                    sum += luma;
+                    const pixel = page.pixel(x, y).*;
+                    sum += @as(Color, pixel);
                     inside += 1;
+                    const luma = color.rgbLuma(pixel);
+                    brightest = @max(brightest, luma);
                     if (luma < darkest[ink_pixels - 1]) {
                         var slot: usize = ink_pixels - 1;
                         while (slot > 0 and darkest[slot - 1] > luma) : (slot -= 1) darkest[slot] = darkest[slot - 1];
@@ -246,22 +273,29 @@ fn cellLuma(allocator: Allocator, layer: Layer, cell: usize, grid_width: usize, 
                     }
                 }
             }
-            const index = cell_y * grid_width + cell_x;
+            const total: f32 = @floatFromInt((x_end - x_start) * (y_end - y_start));
+            const index = cell_y * grid.width + cell_x;
             if (!(inside >= min_inside_fraction * total and inside >= ink_pixels)) {
-                out[index] = std.math.nan(f32);
+                ink[index] = std.math.nan(f32);
+                mean[index] = std.math.nan(f32);
+                tint[index] = std.math.nan(f32);
+                colors.mean[index] = @splat(0);
+                colors.contrast[index] = std.math.nan(f32);
                 continue;
             }
-            out[index] = switch (statistic) {
-                .mean => sum / inside,
-                .ink => blk: {
-                    var ink_sum: f32 = 0;
-                    for (darkest) |value| ink_sum += value;
-                    break :blk ink_sum / ink_pixels;
-                },
-            };
+            var ink_sum: f32 = 0;
+            for (darkest) |value| ink_sum += value;
+            ink[index] = ink_sum / ink_pixels;
+            const mean_color: [channels]f32 = sum / @as(Color, @splat(inside));
+            // The luma is a weighted sum of the channels, so the luma of the mean
+            // colour is the mean luma.
+            mean[index] = color.rgbLuma(mean_color);
+            tint[index] = mean_color[red] - mean_color[blue];
+            colors.mean[index] = mean_color;
+            colors.contrast[index] = brightest - darkest[0];
         }
     }
-    return out;
+    return .{ .ink = ink, .mean = mean, .tint = tint, .colors = colors };
 }
 
 /// A 3x3 mean over the cells with data. A cell without data stays without data.
@@ -290,39 +324,6 @@ fn smoothCells(allocator: Allocator, values: []f32, grid_width: usize, grid_heig
     }
 }
 
-/// The mean red minus the mean blue of each cell: the tint. Paper and black ink are
-/// near zero. A cell with too many pixels outside the frame gets NaN.
-fn cellTint(allocator: Allocator, layer: Layer, cell: usize, grid_width: usize, grid_height: usize) Allocator.Error![]f32 {
-    const out = try allocator.alloc(f32, grid_width * grid_height);
-    const page = layer.page;
-    const red = 0;
-    const blue = 2;
-    for (0..grid_height) |cell_y| {
-        for (0..grid_width) |cell_x| {
-            const x_start = cell_x * cell;
-            const y_start = cell_y * cell;
-            const x_end = @min(x_start + cell, page.width);
-            const y_end = @min(y_start + cell, page.height);
-            var difference: f32 = 0;
-            var inside: f32 = 0;
-            for (y_start..y_end) |y| {
-                for (x_start..x_end) |x| {
-                    if (layer.outside) |mask| {
-                        if (mask.at(x, y) != 0) continue;
-                    }
-                    const pixel = page.pixel(x, y);
-                    difference += pixel[red] - pixel[blue];
-                    inside += 1;
-                }
-            }
-            const total: f32 = @floatFromInt((x_end - x_start) * (y_end - y_start));
-            const enough = inside >= min_inside_fraction * total and inside >= ink_pixels;
-            out[cell_y * grid_width + cell_x] = if (enough) difference / inside else std.math.nan(f32);
-        }
-    }
-    return out;
-}
-
 /// With this many frames at a cell, the second darkest value is the ink value.
 const frames_for_second_darkest = 4;
 
@@ -343,55 +344,45 @@ pub fn fuse(allocator: Allocator, layers: []const Layer, options: Options, fault
     const grid_height = (page.height + cell - 1) / cell;
     const cell_count = grid_width * grid_height;
 
-    var grid: CellGrid = .{ .width = grid_width, .height = grid_height, .luma = try allocator.alloc([]f32, layers.len) };
-    var built: usize = 0;
-    defer {
-        for (grid.luma[0..built]) |plane| allocator.free(plane);
-        allocator.free(grid.luma);
-    }
-    for (layers, 0..) |layer, index| {
-        grid.luma[index] = try cellLuma(allocator, layer, cell, grid_width, grid_height, .ink);
-        built = index + 1;
-        try smoothCells(allocator, grid.luma[index], grid_width, grid_height);
-    }
-
-    // The fingers on each layer. A layer gives no data where it shows a finger.
+    // One pass over each layer gives its cell values and its fingers. A layer gives
+    // no data where it shows a finger.
     const finger_grid: finger.Grid = .{ .width = grid_width, .height = grid_height, .cell = cell };
+    var grid: CellGrid = .{ .width = grid_width, .height = grid_height, .luma = try allocator.alloc([]f32, layers.len) };
+    // The mean luma and the tint of each cell, for each layer.
+    const means = try allocator.alloc([]f32, layers.len);
+    const tints = try allocator.alloc([]f32, layers.len);
     const masks = try allocator.alloc(finger.Mask, layers.len);
+    const covered = try allocator.alloc([]const bool, layers.len);
+    var built: usize = 0;
     var masks_built: usize = 0;
     defer {
+        for (grid.luma[0..built], means[0..built], tints[0..built]) |ink_plane, mean_plane, tint_plane| {
+            allocator.free(ink_plane);
+            allocator.free(mean_plane);
+            allocator.free(tint_plane);
+        }
         for (masks[0..masks_built]) |mask| mask.deinit(allocator);
-        allocator.free(masks);
-    }
-    const covered = try allocator.alloc([]const bool, layers.len);
-    defer allocator.free(covered);
-    // The mean luma of each cell, for each layer.
-    const means = try allocator.alloc([]f32, layers.len);
-    var means_built: usize = 0;
-    defer {
-        for (means[0..means_built]) |plane| allocator.free(plane);
+        allocator.free(grid.luma);
         allocator.free(means);
-    }
-    // The tint of each cell, for each layer.
-    const tints = try allocator.alloc([]f32, layers.len);
-    var tints_built: usize = 0;
-    defer {
-        for (tints[0..tints_built]) |plane| allocator.free(plane);
         allocator.free(tints);
+        allocator.free(masks);
+        allocator.free(covered);
     }
     {
         const no_data = try allocator.alloc(bool, cell_count);
         defer allocator.free(no_data);
         for (layers, 0..) |layer, index| {
-            const mean = try cellLuma(allocator, layer, cell, grid_width, grid_height, .mean);
-            means[index] = mean;
-            means_built = index + 1;
-            try smoothCells(allocator, mean, grid_width, grid_height);
-            tints[index] = try cellTint(allocator, layer, cell, grid_width, grid_height);
-            tints_built = index + 1;
-            try smoothCells(allocator, tints[index], grid_width, grid_height);
-            for (no_data, mean) |*missing, value| missing.* = std.math.isNan(value);
-            masks[index] = try finger.find(allocator, layer.page, layer.outside, no_data, finger_grid, options.finger);
+            const cells = try measureLayer(allocator, layer, finger_grid);
+            defer cells.colors.deinit(allocator);
+            grid.luma[index] = cells.ink;
+            means[index] = cells.mean;
+            tints[index] = cells.tint;
+            built = index + 1;
+            try smoothCells(allocator, cells.ink, grid_width, grid_height);
+            try smoothCells(allocator, cells.mean, grid_width, grid_height);
+            try smoothCells(allocator, cells.tint, grid_width, grid_height);
+            for (no_data, cells.mean) |*missing, value| missing.* = std.math.isNan(value);
+            masks[index] = try finger.find(allocator, cells.colors, no_data, finger_grid, options.finger);
             masks_built = index + 1;
             covered[index] = masks[index].covered;
         }

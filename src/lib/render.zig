@@ -36,6 +36,11 @@ pub const Options = struct {
     /// page is a plane through its four corners. The default is off: on the
     /// benchmark video the correction lowers the quality, see decision 0012.
     curl: bool = false,
+    /// Find the pages of each donor frame again at the full size. When off, a donor
+    /// frame takes the page corners of the analysis pass: they are only the start
+    /// value of the registration, and the detector at the full size costs much
+    /// time. The curl correction needs the page outlines, so it turns this on.
+    redetect_donors: bool = false,
     /// Keep a map of what the fusion did in each cell of a page, for a debug picture.
     fault_maps: bool = false,
     /// Keep the page of each frame as it goes into the fusion, for debug pictures.
@@ -179,6 +184,16 @@ fn fullLayout(scratch: Allocator, source: SourceFrame, kind: detect.LayoutKind, 
     return layout;
 }
 
+/// The page layout of a frame as the analysis pass found it.
+fn analysisLayout(source: SourceFrame) FullLayout {
+    return .{
+        .quads = source.quads,
+        .clipped_edges = source.clipped_edges,
+        .outlines = @splat(null),
+        .redetected = false,
+    };
+}
+
 fn pageAspect(size: image.Size) f32 {
     return @as(f32, @floatFromInt(size.width)) / @as(f32, @floatFromInt(size.height));
 }
@@ -310,8 +325,9 @@ pub fn renderSpread(
     const layout = try fullLayout(scratch, reference, kind, options);
     const donor_layouts = try scratch.alloc(FullLayout, donors.len);
     defer scratch.free(donor_layouts);
+    const redetect = options.redetect_donors or options.curl;
     for (donors, donor_layouts) |donor, *donor_layout| {
-        donor_layout.* = try fullLayout(scratch, donor, kind, options);
+        donor_layout.* = if (redetect) try fullLayout(scratch, donor, kind, options) else analysisLayout(donor);
     }
 
     var spread: RenderedSpread = .{ .pages = undefined, .page_count = 0, .redetected = layout.redetected };
