@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# CI has no benchmark video. It lints, runs the unit tests, and builds the release binary.
+# The label `docker` is the label of the Forgejo runner; .github/actionlint.yaml lists it.
+jobs:
+  lint:
+    runs-on: docker
+    container: nixos/nix:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint
+        run: nix --extra-experimental-features "nix-command flakes" develop --command scripts/lint.sh
+
+  test:
+    runs-on: docker
+    container: nixos/nix:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test
+        run: nix --extra-experimental-features "nix-command flakes" develop --command scripts/test.sh
+
+  build:
+    runs-on: docker
+    container: nixos/nix:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: nix --extra-experimental-features "nix-command flakes" develop --command scripts/build.sh
+
+  check:
+    if: always()
+    needs: [lint, test, build]
+    runs-on: docker
+    steps:
+      - name: Check the result of every job
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS"
+          echo "$RESULTS" | grep -q '"result": *"\(failure\|cancelled\|skipped\)"' && exit 1 || exit 0

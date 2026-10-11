@@ -1,0 +1,19 @@
+# Zig build output
+/.zig-cache/
+/zig-out/
+
+# Nix and direnv
+/.direnv/
+/result
+/result-*
+
+# Local configuration
+.env
+.envrc
+
+# Decoded frames and benchmark output. The videos are large: keep them outside the repository.
+/.cache/
+/out/
+*.mp4
+*.mov
+*.mkv

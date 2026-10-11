@@ -1,0 +1,10 @@
+# typos: spell check of code and docs. Run with `typos` or through prek.
+[default.extend-words]
+# Family names of authors in docs/references.md and docs/research/.
+Furst = "Furst"
+Winn = "Winn"
+Gool = "Gool"
+
+[files]
+# flake.lock holds hashes; their letters read as words.
+extend-exclude = ["flake.lock", "prototypes/"]

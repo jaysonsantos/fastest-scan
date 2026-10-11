@@ -1,0 +1,82 @@
+# Every linter of the repository. Run all of them with `prek run --all-files`,
+# and `prek install` once to run them on each commit. The tools come from flake.nix.
+# flake.lock comes from nix and CHANGELOG.md comes from git-cliff: never format them.
+# prototypes/ holds the record of experiments as a research agent wrote them; it is
+# not a part of the product and stays as it ran.
+exclude: ^(flake\.lock$|CHANGELOG\.md$|prototypes/)
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-yaml
+      - id: check-json
+      - id: mixed-line-ending
+      - id: check-executables-have-shebangs
+      # A video or a decoded frame must never enter the repository.
+      - id: check-added-large-files
+        args: [--maxkb=512]
+
+  - repo: local
+    hooks:
+      - id: zig-fmt
+        name: zig fmt
+        entry: zig fmt --check
+        language: system
+        files: \.(zig|zon)$
+
+      - id: zig-build
+        name: zig build (compile check of every target)
+        entry: zig build check
+        language: system
+        pass_filenames: false
+        files: \.(zig|zon)$
+
+      - id: shellcheck
+        name: shellcheck
+        entry: shellcheck --external-sources
+        language: system
+        files: \.sh$
+
+      - id: shfmt
+        name: shfmt
+        entry: shfmt --diff --indent 2 --language-dialect bash
+        language: system
+        files: \.sh$
+
+      - id: taplo
+        name: taplo fmt
+        entry: taplo fmt --check
+        language: system
+        files: \.toml$
+
+      - id: nixfmt
+        name: nixfmt
+        entry: nixfmt --check
+        language: system
+        files: \.nix$
+
+      - id: actionlint
+        name: actionlint
+        entry: actionlint -config-file .github/actionlint.yaml
+        language: system
+        files: ^\.forgejo/workflows/.*\.ya?ml$
+
+      - id: typos
+        name: typos
+        entry: typos --force-exclude
+        language: system
+        exclude_types: [binary]
+
+      - id: editorconfig
+        name: editorconfig
+        entry: editorconfig-checker
+        language: system
+
+      - id: gitleaks
+        name: gitleaks
+        entry: gitleaks git --pre-commit --staged --redact --verbose
+        language: system
+        pass_filenames: false
