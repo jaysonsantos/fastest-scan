@@ -876,12 +876,10 @@ fn assignRegions(allocator: Allocator, context: RegionContext) Allocator.Error!v
             }
             const cells = region[0..region_len];
 
-            // The donor of the region: the layer that agrees best with the reference
-            // around the region, and that is as sharp there. With nothing around the
-            // region to compare, the layer with the most votes.
-            var chosen: ?usize = null;
-            var chosen_shift: Shift = .{};
-            var chosen_quality: f32 = -1;
+            // The layers that can be the donor of the region: each one agrees with
+            // the reference around the region, or has nothing there to compare.
+            var candidates: [max_layers]Candidate = undefined;
+            var candidate_count: usize = 0;
             for (1..context.layers.len) |candidate| {
                 var repaired: usize = 0;
                 for (cells) |index| {
@@ -908,9 +906,31 @@ fn assignRegions(allocator: Allocator, context: RegionContext) Allocator.Error!v
                     // Below each checked layer, in the order of the votes.
                     quality = unchecked_quality * @as(f32, @floatFromInt(votes[candidate])) / @as(f32, @floatFromInt(region_len));
                 }
+                candidates[candidate_count] = .{
+                    .layer = candidate,
+                    .shift = shift,
+                    .quality = quality,
+                    .sharpness = innerSharpness(&context, cells, candidate, shift),
+                };
+                candidate_count += 1;
+            }
+
+            // The donor of the region: the layer that agrees best with the reference
+            // around the region, is as sharp there, and is sharp in the region. With
+            // nothing around the region to compare, the votes take the place of the
+            // agreement.
+            var sharpest: f32 = 0;
+            for (candidates[0..candidate_count]) |candidate| sharpest = @max(sharpest, candidate.sharpness);
+            var chosen: ?usize = null;
+            var chosen_shift: Shift = .{};
+            var chosen_quality: f32 = -1;
+            for (candidates[0..candidate_count]) |candidate| {
+                // A region of blank paper has only noise: no layer is sharper there.
+                const relative = if (sharpest >= min_inner_sharpness) candidate.sharpness / sharpest else 1;
+                const quality = candidate.quality * relative;
                 if (quality > chosen_quality) {
-                    chosen = candidate;
-                    chosen_shift = shift;
+                    chosen = candidate.layer;
+                    chosen_shift = candidate.shift;
                     chosen_quality = quality;
                 }
             }
@@ -926,6 +946,70 @@ fn assignRegions(allocator: Allocator, context: RegionContext) Allocator.Error!v
             }
         }
     }
+}
+
+/// A layer that can be the donor of a region.
+const Candidate = struct {
+    layer: usize,
+    shift: Shift,
+    /// The agreement with the reference around the region and the sharpness there,
+    /// or the share of the votes when there is nothing to compare.
+    quality: f32,
+    /// `innerSharpness` of the layer in the region.
+    sharpness: f32,
+};
+
+/// The sharpest layer of a region must reach this value for the sharpness to count,
+/// in luma codes of the patch check. Below it the region shows blank paper.
+const min_inner_sharpness = 4.0;
+
+/// How sharp a layer is in the cells of a region that it repairs, at its shift: the
+/// root mean square of the luma difference of two pixels next to each other, for
+/// the direction where it is smaller. Blur makes each edge wide and the squares
+/// small; the blur of a camera that moves does that in one direction only. The
+/// reference cannot be the measure here: it is wrong in the region.
+///
+/// The sum of squared gradients as a measure of focus is the Tenengrad measure:
+/// J. M. Tenenbaum, "Accommodation in computer vision", PhD thesis, Stanford
+/// University, 1970, and E. Krotkov, "Focusing", International Journal of Computer
+/// Vision 1(3), 1987.
+fn innerSharpness(context: *const RegionContext, cells: []const u32, layer: usize, shift: Shift) f32 {
+    const plane = context.lumas[layer];
+    const outside = context.layers[layer].outside;
+    // The pixel to the right and the pixel below must exist.
+    const last_x = @as(i32, @intCast(plane.width)) - 2;
+    const last_y = @as(i32, @intCast(plane.height)) - 2;
+    var sum_x: u64 = 0;
+    var sum_y: u64 = 0;
+    var count: u64 = 0;
+    for (cells) |index| {
+        if (!context.repairs(layer, index)) continue;
+        const x_start = (index % context.grid_width) * context.cell;
+        const y_start = (index / context.grid_width) * context.cell;
+        const x_end = @min(x_start + context.cell, plane.width);
+        const y_end = @min(y_start + context.cell, plane.height);
+        for (y_start..y_end) |y| {
+            const from_y = @as(i32, @intCast(y)) + shift.y;
+            if (from_y < 0 or from_y > last_y) continue;
+            for (x_start..x_end) |x| {
+                const from_x = @as(i32, @intCast(x)) + shift.x;
+                if (from_x < 0 or from_x > last_x) continue;
+                const at_x: usize = @intCast(from_x);
+                const at_y: usize = @intCast(from_y);
+                if (outside) |mask| {
+                    if (mask.at(at_x, at_y) != 0) continue;
+                }
+                const here: i32 = plane.at(at_x, at_y);
+                const right = @as(i32, plane.at(at_x + 1, at_y)) - here;
+                const below = @as(i32, plane.at(at_x, at_y + 1)) - here;
+                sum_x += @intCast(right * right);
+                sum_y += @intCast(below * below);
+                count += 1;
+            }
+        }
+    }
+    if (count == 0) return 0;
+    return @sqrt(@as(f32, @floatFromInt(@min(sum_x, sum_y))) / @as(f32, @floatFromInt(count)));
 }
 
 /// A cell that still needs a region donor.
@@ -1438,6 +1522,32 @@ test "a donor that lies some pixels off repairs the page at the right place" {
     // The words under the glare are back where they are on the page. A copy of the
     // donor with no shift leaves each word 3 pixels off: a mean difference near 0.2.
     try testing.expect(meanDifference(pages[0], clean, 56, 96, 60, 92) < 0.05);
+}
+
+test "among the donors that agree, a region takes the one that is sharp in the region" {
+    const clean = try testTextPage(testing.allocator, 7, 0, 0);
+    defer clean.deinit(testing.allocator);
+    var pages: [3]RgbF32 = undefined;
+    for (&pages) |*page| page.* = try testTextPage(testing.allocator, 7, 0, 0);
+    defer for (pages) |page| page.deinit(testing.allocator);
+    fillGlare(pages[0], 48, 104, 56, 96);
+    // The first donor is blurred where the reference has the glare, and sharp
+    // around it: the check around the region cannot tell the two donors apart.
+    for (56..96) |y| {
+        for (48..104) |x| {
+            var sum: f32 = 0;
+            for (x - 3..x + 4) |from_x| sum += clean.pixel(from_x, y)[1];
+            pages[1].pixel(x, y).* = @splat(sum / 7);
+        }
+    }
+
+    const layers = [_]Layer{ .{ .page = pages[0] }, .{ .page = pages[1] }, .{ .page = pages[2] } };
+    const stats = try fuse(testing.allocator, &layers, .{}, null);
+    try testing.expect(stats.glare > 0.02);
+    try testing.expectEqual(@as(f32, 0), stats.rejected);
+    // The sharp words are back. The blurred donor leaves a mean difference of
+    // about 0.04 in this rectangle.
+    try testing.expect(meanDifference(pages[0], clean, 56, 96, 60, 92) < 0.01);
 }
 
 test "a donor that shows other content around the fault repairs nothing" {

@@ -43,7 +43,8 @@ them frames that cut the page (views from near):
 - a page that the reference frame cuts gets its missing part from another frame.
 
 A donor frame repairs a region only when it agrees with the reference around that
-region.
+region. Among such frames, the region takes the one that is sharp in the region
+(decision 0016).
 
 A finger that holds the page in all frames gets the colour of the paper around it
 (decision 0014). No page of the benchmark result shows a thumb. Text below a
@@ -109,8 +110,6 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
      bends. Use a shift per part of the region.
    - A finer glare mask: `docs/research/fusion-prototype.md` repairs single words
      that the 8 px cells here do not find.
-   - The sharpness of a donor in the region that it repairs. Today the patch check
-     measures it around the region.
    - Fingers: done (decision 0014). What is left: skin numbers from more videos,
      and a thin strip of the desk at a page edge.
 5. **Speed.** Done in a first form (decision 0015): about 40 s in place of 65 s.
@@ -150,7 +149,6 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
 - **The skin rule comes from one video.** Another skin tone or another light can
   need other numbers. Print with the colour of skin and no texture that touches
   the page border counts as a finger.
-- The header "BUTTON FUNCTIONS" is a little less sharp than before decision 0014.
 - **A page that moves.** The page "Vielen Dank" (page 14) lifts from the desk in
   all of its frames: it is skewed and blurred.
 - **Curved pages.** A page that lifts from the desk gets curved text lines. The
