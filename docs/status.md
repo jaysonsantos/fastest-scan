@@ -49,8 +49,8 @@ region. Among such frames, the region takes the one that is sharp in the region
 
 A finger that holds the page in all frames gets the colour of the paper around it
 (decision 0014). No page of the benchmark result shows a thumb or the tip of a
-thumb; on 2 pages a thin line of a tip stays at the bottom edge (decision 0022).
-Text below a
+thumb. One page keeps a dark mark of 3 pixels at its bottom edge, and one a
+faint line (decisions 0022 and 0025). Text below a
 finger is lost: `--fingers blank` and `--fingers keep` change the rule.
 
 | Part | State |
@@ -113,10 +113,10 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
      bends. Use a shift per part of the region.
    - A finer glare mask: `docs/research/fusion-prototype.md` repairs single words
      that the 8 px cells here do not find.
-   - Fingers: done (decisions 0014, 0018, 0021, and 0022). What is left: a video
-     of the user in other light, the thin line of a thumb tip on 2 pages (pale
-     yellow skin in the light of the lamp fails the skin test), and a strip of
-     the desk in a shadow at a page edge.
+   - Fingers: done (decisions 0014, 0018, 0021, 0022, and 0025). What is left:
+     a video of the user in other light, a strip of the desk in a shadow at a
+     page edge, and the edge of a finger of a donor frame at the page border
+     (one dark mark on the benchmark).
 5. **Speed.** Done in a third form. Decision 0015: a donor frame takes the page
    corners of the first pass, and the warp, the registration, and the flatten
    step have vector code. Decision 0017: each worker keeps its large blocks of

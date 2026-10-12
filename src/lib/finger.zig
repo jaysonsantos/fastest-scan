@@ -104,7 +104,7 @@ pub const Options = struct {
 
     /// The halo of a finger: the mask grows from the margin over paper with a
     /// shadow or a tint, up to this many cells.
-    halo_cells: u8 = 10,
+    halo_cells: u8 = 16,
     /// A cell of the halo has no texture: its luma changes by this much at most.
     max_halo_contrast: f32 = 0.15,
     /// A cell of the halo has a tint: red is this much above blue.
@@ -113,6 +113,12 @@ pub const Options = struct {
     max_halo_luma: f32 = 0.93,
     /// A cell of the halo is not darker than this. A darker cell is print.
     min_halo_luma: f32 = 0.6,
+    /// The mask grows this many cells more from the halo, over the cells of a rim.
+    /// The halo ends at the rim of a pale finger: the rim has a line of shadow, so
+    /// its cells have more texture than a halo cell. A cell of a rim has a tint,
+    /// the luma of a halo cell, and the texture that skin can have. A cell with
+    /// text has more texture and no tint.
+    rim_cells: u8 = 1,
     /// A group of cells that the mask closes in, with this many cells at most,
     /// belongs to the mask too: the dark gap between two fingers, for example.
     max_hole_cells: u16 = 48,
@@ -143,8 +149,10 @@ pub const Options = struct {
     /// The cells this near to the border of the page do not count as ink: the
     /// edge of the page has a shadow, and the desk shows there.
     page_border_cells: u8 = 2,
-    /// A finger with its halo that is larger than this fraction of the page is
-    /// not painted: it can be a picture.
+    /// A finger that is larger than this fraction of the page is not painted: it
+    /// can be a picture, and a hand of that size hides much of the page. The
+    /// margin and the halo do not count: they are paper, and their size says
+    /// nothing about what the finger hides.
     max_region_fraction: f32 = 0.15,
     /// In a cell with ink, the paint covers a pixel with a luma above this in
     /// full: the pixel is paper.
@@ -173,6 +181,7 @@ pub const Options = struct {
         sized.lit_core_cells = scaledSize(u8, self.lit_core_cells, scale);
         sized.margin_cells = scaledSize(u8, self.margin_cells, scale);
         sized.halo_cells = scaledSize(u8, self.halo_cells, scale);
+        sized.rim_cells = scaledSize(u8, self.rim_cells, scale);
         sized.edge_cells = scaledSize(u8, self.edge_cells, scale);
         sized.ring_cells = scaledSize(u8, self.ring_cells, scale);
         sized.page_border_cells = scaledSize(u8, self.page_border_cells, scale);
@@ -339,6 +348,15 @@ fn isHalo(mean: [channels]f32, contrast: f32, options: Options) bool {
     return contrast <= options.max_halo_contrast and luma >= options.min_halo_luma and (tinted or shaded);
 }
 
+/// True for the mean colour of a cell at the rim of a pale finger: the tint of a
+/// halo cell, and more texture.
+fn isRim(mean: [channels]f32, contrast: f32, options: Options) bool {
+    const luma = color.rgbLuma(mean);
+    return mean[0] - mean[2] >= options.min_halo_tint and
+        luma >= options.min_halo_luma and
+        contrast <= options.max_cell_contrast;
+}
+
 /// True when the cell or one of the 8 cells around it is set. `beyond` is the value
 /// of a cell beyond the grid.
 fn anyNeighbour(mask: []const bool, grid: Grid, x: usize, y: usize, beyond: bool) bool {
@@ -479,6 +497,11 @@ pub fn find(
     @memcpy(covered, finger);
     dilate(covered, scratch, grid, options.margin_cells, null);
     dilate(covered, scratch, grid, options.halo_cells, halo);
+    // `halo` is free now: it holds the cells of a rim.
+    for (halo, colors.mean, colors.contrast, no_data) |*is_rim, mean, contrast, missing| {
+        is_rim.* = !missing and isRim(mean, contrast, options);
+    }
+    dilate(covered, scratch, grid, options.rim_cells, halo);
     try fillHoles(allocator, covered, grid, options.max_hole_cells);
     return .{ .skin = skin, .finger = finger, .covered = covered };
 }
@@ -586,6 +609,8 @@ fn cellLook(page: RgbF32, outside: ?Plane, grid: Grid, cell_x: usize, cell_y: us
 const Region = struct {
     /// The cells of the fingers with their margin and their halo.
     cells: usize = 0,
+    /// The cells of the fingers alone.
+    finger_cells: usize = 0,
     /// The cells in the region and around it that have ink of the page.
     ink_cells: usize = 0,
     /// The cells around the region that are blank paper.
@@ -666,6 +691,7 @@ pub fn paint(
             stack_len -= 1;
             const index = stack[stack_len];
             region.cells += 1;
+            if (finger[index]) region.finger_cells += 1;
             const x = index % grid.width;
             const y = index / grid.width;
             const y_from = y -| 1;
@@ -757,7 +783,7 @@ pub fn paint(
             const bright: f32 = @floatFromInt(region.bright_cells);
             for (&region.paper, region.bright_sum) |*value, total| value.* = total / bright;
         }
-        const small = @as(f32, @floatFromInt(region.cells)) <= max_cells;
+        const small = @as(f32, @floatFromInt(region.finger_cells)) <= max_cells;
         const blank = region.ink_cells <= options.max_ink_cells;
         region.painted = small and (blank or options.paint == .all);
     }
@@ -1005,7 +1031,7 @@ test "the sizes in cells follow the width of the page" {
     // A page of half the width: half the distances, a quarter of the cell counts.
     const half = options.forGrid(.{ .width = 81, .height = 117, .cell = 8 });
     try testing.expectEqual(@as(u8, 1), half.core_cells);
-    try testing.expectEqual(@as(u8, 5), half.halo_cells);
+    try testing.expectEqual(@as(u8, 8), half.halo_cells);
     try testing.expectEqual(@as(u16, 12), half.max_hole_cells);
     try testing.expectEqual(@as(u8, 2), half.min_blank_cells);
     // A second call changes nothing.
@@ -1200,6 +1226,47 @@ test "with the paint off, a finger stays" {
     try testPaint(page, .{ .paint = .none }, outcome);
     try testing.expectEqual(Outcome.left, outcome[cellAt(page, 140, 360)]);
     try testing.expectEqualSlices(f32, before, page.data);
+}
+
+test "the rim of a pale finger belongs to its mask, text next to the finger does not" {
+    const page = try testPage(testing.allocator);
+    defer page.deinit(testing.allocator);
+    // A finger from the bottom edge. Its upper part is pale and yellow in the light
+    // of a lamp: the skin test does not accept it, and it has the look of a halo.
+    const pale = [channels]f32{ 0.89, 0.70, 0.42 };
+    fill(page, 104, 176, 344, 400, test_skin);
+    fill(page, 104, 176, 280, 344, pale);
+    // The rim of the pale part: one row of cells with a line of shadow in it.
+    fill(page, 104, 176, 272, 280, pale);
+    fill(page, 104, 176, 274, 276, .{ 0.6, 0.45, 0.25 });
+    // Text at the left of the pale part.
+    fillText(page, 80, 104, 280, 320);
+
+    const mask = try testFind(page, null);
+    defer mask.deinit(testing.allocator);
+    // The pale part is not skin, and the mask covers it as a halo.
+    try testing.expect(!mask.skin[cellAt(page, 140, 300)]);
+    try testing.expect(mask.covered[cellAt(page, 140, 300)]);
+    // The rim is no halo cell: it has more texture. The mask covers it too.
+    try testing.expect(mask.covered[cellAt(page, 140, 276)]);
+    // The paper above the rim and the text stay out.
+    try testing.expect(!mask.covered[cellAt(page, 140, 260)]);
+    try testing.expect(!mask.covered[cellAt(page, 84, 300)]);
+}
+
+test "the size limit of the paint counts the finger, not its halo" {
+    const page = try testPage(testing.allocator);
+    defer page.deinit(testing.allocator);
+    // A finger of a tenth of the page, and a large area of paper with a tint
+    // above it. The two together are more than `max_region_fraction` of the page.
+    fill(page, 96, 224, 304, 400, test_skin);
+    fill(page, 40, 280, 200, 304, .{ 0.99, 0.95, 0.88 });
+    const outcome = try testing.allocator.alloc(Outcome, Grid.init(page, test_cell).count());
+    defer testing.allocator.free(outcome);
+
+    try testPaint(page, .{}, outcome);
+    try testing.expectEqual(Outcome.painted, outcome[cellAt(page, 160, 350)]);
+    try testing.expectApproxEqAbs(@as(f32, 1.0), page.pixel(160, 350)[1], 0.03);
 }
 
 test "a blob that is larger than a finger stays" {
