@@ -217,7 +217,10 @@ pub const Tracker = struct {
         const options = self.options;
         const rate_factor = Options.reference_frame_rate / @max(options.frames_per_second, 1);
         const max_motion = options.max_motion * rate_factor;
-        const max_gap: usize = @intFromFloat(@round(options.max_gap_seconds * options.frames_per_second));
+        // The limit of a break, in frames and not rounded: at 30 frames in a second
+        // it is 4.5 frames. A rounded limit is 5 frames for a rate of 30.00 and 4
+        // frames for a rate of 29.99, and one video then gives two results.
+        const max_gap_frames = options.max_gap_seconds * options.frames_per_second;
 
         // A frame is stable when it looks like the frame before it and the pages did not move.
         const frame = window.at(index);
@@ -246,7 +249,7 @@ pub const Tracker = struct {
             step.opened = true;
         } else if (self.current) |run| {
             self.gap += 1;
-            if (self.gap > max_gap) {
+            if (@as(f32, @floatFromInt(self.gap)) > max_gap_frames) {
                 self.close(window, run, &step);
                 self.current = null;
                 self.gap = 0;
@@ -1154,6 +1157,24 @@ test "the donor choice and the reference choice free their memory when an alloca
     const ranges: []const FrameSpan = &spans;
     try alloc_check.eachFailure(testing.allocator, Check.donors, .{ frames, ranges });
     try alloc_check.eachFailure(testing.allocator, Check.reference, .{ frames, ranges });
+}
+
+test "a frame rate just below a whole number gives the spreads of the whole number" {
+    var observations: [120]FrameObservation = undefined;
+    for (0..30) |index| observations[index] = testObservation(1, .spread, 0, 0.5);
+    // A break of five frames: longer than 0.15 seconds at 30 frames in a second.
+    for (30..35) |index| observations[index] = FrameObservation.none;
+    for (35..70) |index| observations[index] = testObservation(2, .spread, 0, 0.5);
+    for (70..80) |index| observations[index] = FrameObservation.none;
+    for (80..120) |index| observations[index] = testObservation(3, .spread, 0, 0.5);
+
+    const exact = try build(testing.allocator, &observations, .{ .frames_per_second = 30 });
+    defer exact.deinit(testing.allocator);
+    // A phone says 30; the times of the frames of the same video give 29.99.
+    const measured = try build(testing.allocator, &observations, .{ .frames_per_second = 29.99 });
+    defer measured.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 3), exact.segments.len);
+    try testing.expectEqualSlices(Segment, exact.segments, measured.segments);
 }
 
 test "the tracker gives the spreads of `build`, each one after the next spread is known" {

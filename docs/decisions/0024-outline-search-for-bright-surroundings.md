@@ -103,6 +103,7 @@ All runs on 2026-10-12, on the desktop.
 | Benchmark at 1920 x 1080 | 64 pages | 64 pages, the same bytes of the PDF |
 | The phone video of 2026-10-12, two passes | 18 pages of 847 x 1078, none a page of the book | 7 pages of 369 x 577: the cover, and three spreads of the book |
 | The same video, stream mode | 18 pages, none a page of the book | 7 pages of 438 x 603, the same pages |
+| The same video, the app on the Android emulator | 14 pages on a phone, none a page of the book | 7 pages of 438 x 603, the same pages |
 
 - On the benchmark, 145 of 4984 frames get another observation: frames in which
   the paper runs out of the frame during a page turn. The spreads of the
@@ -110,6 +111,11 @@ All runs on 2026-10-12, on the desktop.
 - The analysis of the phone video takes 4.3 s, before 3.1 s: there the search
   runs on each frame.
 - The phone video has more spreads than the result: see "Limits".
+- The app first gave 10 pages where the desktop gave 7. The cause was not the
+  detector: the timeline rounded the limit of a break (0.15 seconds) to frames.
+  At 30 frames in a second that is 4.5 frames: 5 for the rate of 30.00 that the
+  phone reports, and 4 for the rate of 29.99 that the desktop measures. The
+  timeline now compares the break with the limit that is not rounded.
 
 Four public videos with a bright desk (Tariq Dar and Khan 2017, enlarged four
 times) give other page counts than before: 37, 25, 24, and 50 pages, before 16,
