@@ -105,4 +105,122 @@ pub fn build(b: *std.Build) void {
     }
 
     // endregion: tests and checks
+
+    // region: Java and Android
+
+    // The JNI layer of the Android app, for the Java machine of this computer. A
+    // test on a desktop loads it: scripts/test-jni.sh.
+    const java_home = b.option([]const u8, "java-home", "The directory of a JDK, for the step `jni`");
+    const jni_step = b.step("jni", "Build the JNI library for the Java machine of this computer (needs -Djava-home)");
+    if (java_home) |home| {
+        const jni_lib = addJniLibrary(b, target, optimize, build_options);
+        jni_lib.root_module.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ home, "include" }) });
+        // jni.h includes jni_md.h, which is in a directory with the name of the system.
+        jni_lib.root_module.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ home, "include", @tagName(target.result.os.tag) }) });
+        jni_step.dependOn(&b.addInstallArtifact(jni_lib, .{}).step);
+    } else {
+        jni_step.dependOn(&b.addFail("the step `jni` needs -Djava-home=<the directory of a JDK>").step);
+    }
+
+    // The library for Android. Zig has no C library for Android, so:
+    // - with no NDK, the step builds only the static libraries. They prove that the
+    //   code compiles for the targets; a build with the NDK can link them.
+    // - with -Dandroid-ndk, the step also links the JNI libraries of the app
+    //   against the C library of the NDK, into zig-out/android/jniLibs/<ABI>/.
+    const android_ndk = b.option([]const u8, "android-ndk", "The directory of the Android NDK, for the JNI libraries of the step `android`");
+    const android_api = b.option(u32, "android-api", "The lowest Android API level of the JNI libraries. Default: 26") orelse android_default_api;
+    const android_step = b.step("android", "Build the library for Android (the JNI libraries need -Dandroid-ndk)");
+    for (android_abis) |abi| {
+        const android_target = b.resolveTargetQuery(.{
+            .cpu_arch = abi.arch,
+            .os_tag = .linux,
+            .abi = .android,
+            .android_api_level = android_api,
+        });
+        const android_module = b.createModule(.{
+            .root_source_file = b.path("src/lib/c_api.zig"),
+            .target = android_target,
+            .optimize = optimize,
+            .link_libc = true,
+            .pic = true,
+        });
+        android_module.addOptions("build_options", build_options);
+        const android_static = b.addLibrary(.{ .name = "fastscan", .linkage = .static, .root_module = android_module });
+        android_step.dependOn(&b.addInstallArtifact(android_static, .{
+            .dest_dir = .{ .override = .{ .custom = b.pathJoin(&.{ "android", "static", abi.name }) } },
+        }).step);
+
+        const ndk = android_ndk orelse continue;
+        const sysroot = b.pathJoin(&.{ ndk, "toolchains", "llvm", "prebuilt", android_ndk_host, "sysroot", "usr" });
+        const crt_dir = b.pathJoin(&.{ sysroot, "lib", abi.triple, b.fmt("{d}", .{android_api}) });
+        // The file that tells Zig where the C library of the target is.
+        const libc_file = b.addWriteFiles().add(b.fmt("android-{s}-libc.txt", .{abi.name}), b.fmt(
+            \\include_dir={s}
+            \\sys_include_dir={s}
+            \\crt_dir={s}
+            \\msvc_lib_dir=
+            \\kernel32_lib_dir=
+            \\cc_dir={s}
+            \\darwin_sdk_dir=
+            \\
+        , .{
+            b.pathJoin(&.{ sysroot, "include" }),
+            b.pathJoin(&.{ sysroot, "include", abi.triple }),
+            crt_dir,
+            crt_dir,
+        }));
+        const android_jni = addJniLibrary(b, android_target, optimize, build_options);
+        android_jni.setLibCFile(libc_file);
+        // Devices with memory pages of 16 KiB need this alignment (Android 15 and later).
+        android_jni.link_z_max_page_size = android_page_bytes;
+        android_step.dependOn(&b.addInstallArtifact(android_jni, .{
+            .dest_dir = .{ .override = .{ .custom = b.pathJoin(&.{ "android", "jniLibs", abi.name }) } },
+        }).step);
+    }
+
+    // endregion: Java and Android
+}
+
+const AndroidAbi = struct {
+    /// The name of the directory of the ABI in an Android app.
+    name: []const u8,
+    arch: std.Target.Cpu.Arch,
+    /// The name of the directory of the ABI in the NDK.
+    triple: []const u8,
+};
+
+/// A phone, and the emulator of a desktop.
+const android_abis = [_]AndroidAbi{
+    .{ .name = "arm64-v8a", .arch = .aarch64, .triple = "aarch64-linux-android" },
+    .{ .name = "x86_64", .arch = .x86_64, .triple = "x86_64-linux-android" },
+};
+
+/// Android 8.0. The app needs it for the camera library.
+const android_default_api = 26;
+const android_page_bytes = 16 * 1024;
+/// The directory of the NDK tools for the system that runs the build.
+const android_ndk_host = "linux-x86_64";
+
+/// The library `fastscan_jni`: the C interface of the library and the JNI layer of
+/// the app in one shared library. The caller adds the directory of `jni.h`.
+fn addJniLibrary(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    build_options: *std.Build.Step.Options,
+) *std.Build.Step.Compile {
+    const module = b.createModule(.{
+        .root_source_file = b.path("src/lib/c_api.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .pic = true,
+    });
+    module.addOptions("build_options", build_options);
+    module.addCSourceFile(.{
+        .file = b.path("android/app/src/main/cpp/fastscan_jni.c"),
+        .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" },
+    });
+    module.addIncludePath(b.path("include"));
+    return b.addLibrary(.{ .name = "fastscan_jni", .linkage = .dynamic, .root_module = module });
 }

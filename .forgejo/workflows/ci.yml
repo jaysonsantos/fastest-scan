@@ -23,7 +23,8 @@ permissions:
 env:
   NIX_CONFIG: experimental-features = nix-command flakes
 
-# CI has no benchmark video. It lints, runs the unit tests, and builds the release binary.
+# CI has no benchmark video. It lints, runs the unit tests and the test of the JNI layer,
+# and builds the release binary.
 jobs:
   lint:
     runs-on: cachyos-nix
@@ -39,6 +40,15 @@ jobs:
       - name: Test
         run: nix develop --command scripts/test.sh
 
+  # The JNI layer of the Android app on the Java machine of the runner. The Android
+  # app itself has no job: its build needs the Android SDK, which has a licence.
+  jni:
+    runs-on: cachyos-nix
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test the JNI layer
+        run: nix develop --command scripts/test-jni.sh
+
   build:
     runs-on: cachyos-nix
     steps:
@@ -48,7 +58,7 @@ jobs:
 
   check:
     if: always()
-    needs: [lint, test, build]
+    needs: [lint, test, jni, build]
     runs-on: cachyos-nix
     steps:
       - name: Check the result of every job

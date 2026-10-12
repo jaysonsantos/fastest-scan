@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">fastest-scan</string>
+    <string name="default_file_name">scan.pdf</string>
+    <string name="last_page_description">The last page of the scan</string>
+
+    <string name="button_camera">Scan</string>
+    <string name="button_stop">Stop</string>
+    <string name="button_video">Video</string>
+    <string name="button_cancel">Cancel</string>
+    <string name="button_save">Save PDF</string>
+
+    <string name="status_idle">Film the pages of a book, or open a video of them.</string>
+    <string name="status_camera_error">The camera does not start: %1$s. You can open a video.</string>
+    <string name="status_camera_refused">The app cannot use the camera. You can open a video.</string>
+    <string name="status_camera">%1$s  Spreads: %2$d. Pages done: %3$d.</string>
+    <string name="status_video">Video: %1$d %%. Spreads: %2$d. Pages done: %3$d.</string>
+    <string name="status_finishing">The last pages are in work.</string>
+    <string name="status_saved">The PDF is saved.</string>
+    <string name="status_error">Error: %1$s</string>
+    <plurals name="status_done">
+        <item quantity="one">The scan has %d page.</item>
+        <item quantity="other">The scan has %d pages.</item>
+    </plurals>
+
+    <string name="hint_no_page">Point the camera at the page.</string>
+    <string name="hint_steady">Hold the page flat.</string>
+    <string name="hint_hold">Hold the phone still.</string>
+    <string name="hint_turn">Done. Turn the page.</string>
+</resources>

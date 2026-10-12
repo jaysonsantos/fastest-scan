@@ -1,7 +1,7 @@
 # 0019: A stream session for a phone: each frame one time, pages while the video runs
 
-Date: 2026-10-12. Status: accepted for the library, the C interface, and the JNI
-layer. The Android app is written and is not built yet: see "What is not verified".
+Date: 2026-10-12. Status: accepted. The app runs on the Android emulator. It did
+not run on a phone: see "What is not verified".
 
 This record adds a second flow to the library. The two passes of decision 0002
 stay the flow of the command-line program.
@@ -199,6 +199,35 @@ that decision moves the good words of a stream run by 3.
   70 s to 85 s of the 145 s to 178 s of a run. `ffmpeg` uses the other time: the
   stream mode has one decoder, which gives each frame at its full size.
 
+### On the Android emulator
+
+The app on the emulator of the Android SDK (Android 16, `x86_64`, 8 CPU threads,
+8 GB of memory), with the defaults of the app: 4 + 2 donors, a limit of 24
+frames, a page height of 2000 pixels at most, and 2 render threads.
+`scripts/test-android.sh <video> 63` gives these numbers for the benchmark video:
+
+| | Emulator |
+|---|---|
+| Pages (expected 63) | 63 |
+| Page size in pixels | 1424 x 2000 |
+| OCR on all pages: good words | 2308 |
+| Time until the last frame | 694 s: 139 ms for each frame |
+| Time until the last page | 698 s |
+| The first page is complete after | 21 s |
+| Full-size frames in memory, at most | 24 |
+| Native memory of the app, at most | 774 MB |
+
+- The decoder of the emulator is a software decoder, and it uses most of the 139
+  ms. The time says nothing about a phone, which has a hardware decoder.
+- The pages come while the video runs: the render threads keep up, and the last
+  page is complete 4 s after the last frame.
+- The native memory is lower than the memory of the desktop program (1.2 GB),
+  because a render thread of the app gives its working memory back after each
+  job.
+- The camera of the emulator gives frames of 1856 x 1392 pixels, on their side
+  (a rotation of 90 degrees). The library gets them and the screen shows the
+  status of each frame. The camera shows a drawn scene and no book.
+
 ## What the stream session does not do
 
 - A donor frame never comes from the time before the stable time of its spread.
@@ -217,20 +246,25 @@ that decision moves the good words of a stream run by 3.
 
 ## What is not verified
 
-- The app was not built: this host has no Android SDK and no NDK. The Kotlin code,
-  the Gradle files, and the Android shell of `flake.nix` were not run.
-- `zig build android -Dandroid-ndk=...` was not run with an NDK. With no NDK, it
-  builds the static libraries for the two Android targets.
-- No run on a phone or an emulator. So these numbers are not known: the time of
-  the analysis for one frame on a phone, the time of a render job, the memory of
-  the app, and the frame rate and the frame size that CameraX gives.
+- No run on a phone. The library for `arm64-v8a` builds and links; it did not
+  run. These numbers are not known: the time of the analysis for one frame on a
+  phone, the time of a render job, and the frame rate and the frame size that
+  CameraX gives.
+- No scan of a real book with the camera. On the emulator, the camera source
+  gives its frames to the library, and no page comes from the drawn scene.
 - The colour of camera frames: the app says full range and the BT.601 matrix for
   them, which is the common case and can be wrong for one phone.
 
-The checks that did run: the unit tests of the session with synthetic videos (a
-source on its side gives the same JPEG bytes as the upright source), the C program
-on the header, the JNI layer on the Java machine of the desktop with
-`-Xcheck:jni`, and the benchmark video through `fastest-scan --stream`.
+The checks that did run:
+
+- The unit tests of the session with synthetic videos. A source on its side gives
+  the same JPEG bytes as the upright source.
+- The C program on the header, and the JNI layer on the Java machine of the
+  desktop with `-Xcheck:jni`.
+- The benchmark video through `fastest-scan --stream`.
+- On the emulator: the two device tests (a synthetic video, and the benchmark
+  video with the decoder of the emulator), and the app by hand: a video opened
+  from another app, the scan, and the PDF saved with the file dialog of Android.
 
 ## Consequences
 
@@ -248,6 +282,9 @@ on the header, the JNI layer on the Java machine of the desktop with
 - The memory of a scan depends on the frame size, the donor frames, the page size,
   and the number of render threads. The defaults of the app are not tuned on a
   phone.
+- The status of a frame has `captured`: the view is long enough for a spread and
+  the frame shows the page well. It is a sign for the user, not a promise: the
+  timeline decides at the end of the view, and the duplicate search after it.
 - The analysis of a frame can run on more than one thread: `Stream.analyze` does
   not change the session, and `Stream.pushObserved` takes the observations in
   order. The C interface does not export these two functions yet.

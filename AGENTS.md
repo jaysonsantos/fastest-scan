@@ -14,9 +14,10 @@ Read `docs/status.md` first. It says what works, what does not, and what is next
 | `src/lib/stream.zig` | The stream session: frames in the order of the video, pages while the video runs. The flow of the Android app (decision 0019). |
 | `src/lib/c_api.zig`, `include/fastscan.h` | The C interface: the stream session, for an Android (JNI) app or another language. |
 | `src/cli/` | The program `fastest-scan`: arguments, `ffmpeg` processes, threads, the output file. |
-| `tests/` | Programs that use the library from outside: `c_api.c` is a C program on the header. |
+| `android/` | The Android app, in Kotlin, and its JNI layer (`android/app/src/main/cpp/`). Read `docs/android.md`. |
+| `tests/` | Programs that use the library from outside: `c_api.c` (C, on the header) and `jni/` (Java, on the JNI layer). |
 | `build.zig`, `build.zig.zon` | The build. `build.zig.zon` holds the only version number. |
-| `scripts/` | `lint.sh`, `test.sh`, `all.sh`, `build.sh`, `bench.sh`, `release.sh`. |
+| `scripts/` | `lint.sh`, `test.sh`, `test-jni.sh`, `test-android.sh`, `all.sh`, `build.sh`, `build-android.sh`, `bench.sh`, `release.sh`. |
 | `docs/status.md` | The state of the work and the next steps. Change it in each commit that changes the state. |
 | `docs/decisions/` | One file per design decision, with the reason. |
 | `docs/research/` | The research behind the decisions, with sources. |
@@ -32,8 +33,13 @@ Read `docs/status.md` first. It says what works, what does not, and what is next
 - Build (debug): `zig build`. Build (fast): `scripts/build.sh`.
 - Run: `zig build run -- <video> -o out.pdf`, or `zig-out/bin/fastest-scan`.
 - Test: `scripts/test.sh`. One file: `zig test src/lib/geometry.zig`.
+- Test the JNI layer on the Java machine of this computer: `scripts/test-jni.sh`.
 - Run the flow of the phone app on a desktop: `zig-out/bin/fastest-scan <video> -o
   out.pdf --stream -v`. It reads the video one time, with no frame cache.
+- Build the Android app: `scripts/build-android.sh`, in the Android shell of the
+  flake. That shell needs the licence of the Android SDK: read `docs/android.md`.
+- Test the app on a phone or an emulator: `scripts/test-android.sh`, or
+  `scripts/test-android.sh <video> <pages>` for a recorded video. Same shell.
 - Lint: `scripts/lint.sh`. One linter: `prek run <hook-id> --all-files`.
   `scripts/check-deprecated.sh` finds a deprecated name of the Zig standard
   library; the compiler gives no warning for it.
@@ -98,6 +104,13 @@ Read `docs/status.md` first. It says what works, what does not, and what is next
 
 ## Facts that surprise
 
+- Zig has no C library for Android. `zig build android` makes static libraries
+  with no NDK; a shared library for Android needs `-Dandroid-ndk=<NDK>`.
+- Gradle removes the app from the device after `connectedDebugAndroidTest`, and
+  Android then deletes the files directory of the app: a video and a result that
+  were there are gone. `scripts/test-android.sh` starts the video test with `adb`.
+- The `c2.goldfish.hevc.decoder` of the emulator decodes a 4K video at about 7
+  frames in a second. A test with the whole benchmark video takes 12 minutes.
 - `ffmpeg` duplicates or drops frames of a variable-rate video unless the command has
   `-fps_mode passthrough`. The frame indexes then do not match the `ffprobe` list.
 - `ffmpeg -ss <t> -noaccurate_seek` starts at the keyframe at or before `t`. The CLI

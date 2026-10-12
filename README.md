@@ -45,6 +45,7 @@ These environment variables set a default for a flag:
 
 - `scripts/lint.sh` runs all linters. `prek install` adds them as a git hook.
 - `scripts/test.sh` runs the unit tests.
+- `scripts/test-jni.sh` tests the JNI layer of the Android app on a desktop.
 - `scripts/all.sh` runs the two.
 - `scripts/bench.sh` converts the benchmark video and prints the quality numbers.
 
@@ -53,6 +54,9 @@ The code has two parts:
 - `src/lib/` is the library `fastscan`. It gets frames and gives page images and PDF
   bytes. It has a C interface (`include/fastscan.h`) for an Android app.
 - `src/cli/` is the program. It decodes the video with `ffmpeg` and calls the library.
+- `android/` is the Android app. It scans with the camera or from a recorded video.
+  It runs on the Android emulator, and it was not tested on a phone: read
+  `docs/android.md`.
 
 The program has two flows. The default reads the video two times and jumps to
 the frames that it needs. `--stream` reads the video one time, in order, and
