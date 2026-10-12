@@ -21,7 +21,8 @@ pub const defaults = struct {
     pub const ffprobe = "ffprobe";
     pub const dpi = fastscan.jpeg.Options.default_dpi;
     pub const quality = fastscan.jpeg.Options.default_quality;
-    /// 0 means: one job for each two CPU cores. One software decoder uses two to three cores.
+    /// 0 means: one worker for each two CPU threads. A worker runs two decoders,
+    /// each with one thread.
     pub const jobs = 0;
     /// The short side of the frames of the analysis pass, in pixels.
     pub const analysis_height = 540;
@@ -124,7 +125,7 @@ const specs = [_]Spec{
     .{ .flag = .layout, .long = "layout", .value = "auto|single|spread", .help = "One page or two pages side by side in the video. Default: auto" },
     .{ .flag = .dpi, .long = "dpi", .value = "N", .help = "Pixels per inch of the pages. It sets the paper size in the PDF. Default: 300" },
     .{ .flag = .quality, .long = "quality", .short = 'q', .value = "1..100", .help = "JPEG quality of the pages. Default: 85" },
-    .{ .flag = .jobs, .long = "jobs", .short = 'j', .value = "N", .env_name = env.jobs, .help = "Parallel decoders. Default: half of the CPU cores" },
+    .{ .flag = .jobs, .long = "jobs", .short = 'j', .value = "N", .env_name = env.jobs, .help = "Parallel workers. Each one runs two decoders and holds about 0.7 GB for a 4K video. Default: half of the CPU threads" },
     .{ .flag = .analysis_height, .long = "analysis-height", .value = "PIXELS", .help = "Short side of the frames of the first pass. Default: 540" },
     .{ .flag = .fusion_frames, .long = "fusion-frames", .value = "0..12", .help = "Other frames that repair glare and covered parts of a page. Up to 3 views from near come in addition. 0 turns the repair off. Default: 6" },
     .{ .flag = .curl, .long = "curl", .help = "Correct the curl of the pages of a thick book (experimental)" },

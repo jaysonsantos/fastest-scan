@@ -33,6 +33,7 @@ Read `docs/status.md` first. It says what works, what does not, and what is next
 - Lint: `scripts/lint.sh`. One linter: `prek run <hook-id> --all-files`.
 - Lint and test: `scripts/all.sh`.
 - Benchmark: `scripts/bench.sh`. It needs the video of `FASTEST_SCAN_BENCH_VIDEO`.
+  `BENCH_NO_CACHE=1` runs it with no frame cache: the time that a user gets.
   The OCR sample of 16 pages is noisy. For a decision about quality, run
   `BENCH_OCR_STEP=1 scripts/bench.sh` and look at `faults/` in the debug directory.
 - Debug pictures: `--debug-dir DIR`. `faults/` shows what the fusion did in each
@@ -85,3 +86,9 @@ Read `docs/status.md` first. It says what works, what does not, and what is next
 - The `ffmpeg` of the nix shell cannot open VAAPI on a non-NixOS host. Use
   `--ffmpeg /usr/bin/ffmpeg --hwaccel vaapi` for hardware decode.
 - Phone video is limited-range BT.709: paper white is near luma 160 to 235, not 255.
+- `ffmpeg` takes one thread per CPU thread by default. A decoder with 16 threads
+  uses 5 times the memory of one with 1 thread, and it decodes frames after the
+  last frame that it gives. The CLI starts each decoder with `-threads 1` and
+  runs many of them (decision 0020).
+- The benchmark time with `--cache-dir` has no decoder in it. A run with no cache
+  takes about three times as long: `BENCH_NO_CACHE=1 scripts/bench.sh`.

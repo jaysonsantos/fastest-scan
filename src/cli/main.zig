@@ -14,8 +14,8 @@ const exit_code = struct {
 };
 
 const stdout_buffer_bytes = 4096;
-/// One software decoder uses two to three cores.
-const cores_per_decoder = 2;
+/// A worker runs `pipeline.decoders_per_worker` decoders, each with one thread.
+const cpu_threads_per_worker = pipeline.decoders_per_worker;
 const percent = 100.0;
 const bytes_per_megabyte = 1024 * 1024;
 
@@ -71,14 +71,15 @@ fn run(init: std.process.Init, config: *const args.Config, stdout: *Io.Writer) !
     const worker_count: usize = if (config.jobs > 0)
         config.jobs
     else
-        @max(1, (std.Thread.getCpuCount() catch 1) / cores_per_decoder);
+        @max(1, (std.Thread.getCpuCount() catch 1) / cpu_threads_per_worker);
     if (config.verbose) {
-        std.debug.print("video: {d}x{d}, {d} frames, {d:.1} s; {d} decoders\n", .{
+        std.debug.print("video: {d}x{d}, {d} frames, {d:.1} s; {d} workers, {d} decoders\n", .{
             info.width,
             info.height,
             info.frames.len,
             info.seconds(info.frames.len - 1),
             worker_count,
+            worker_count * pipeline.decoders_per_worker,
         });
     }
 
@@ -140,6 +141,10 @@ fn run(init: std.process.Init, config: *const args.Config, stdout: *Io.Writer) !
             document.memory.fresh_blocks,
             document.memory.fresh_bytes / bytes_per_megabyte,
             document.memory.reused_blocks,
+        });
+        std.debug.print("decode: the render pass needed {d} full-size frames; the decoders decoded {d} frames for them\n", .{
+            document.frames_taken,
+            document.frames_decoded,
         });
     }
 

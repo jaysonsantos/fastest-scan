@@ -43,6 +43,10 @@ const clipped_quality_weight = 0.5;
 /// of a spread. In that time the hand is at another place and the glare too.
 const donor_margin_seconds = 1.2;
 const pdf_buffer_bytes = 256 * 1024;
+/// The decoders that one worker runs at the same time. A decoder has one thread
+/// (`ffmpeg.ReaderOptions.threads`), and the default number of workers is half of
+/// the CPU threads, so the decoders together use each CPU thread.
+pub const decoders_per_worker = 2;
 /// The working memory of one analysis job. One frame needs about 4 MB at 960 x 540.
 const scratch_bytes = 96 * 1024 * 1024;
 
@@ -256,7 +260,8 @@ pub fn analyze(io: Io, gpa: Allocator, config: *const args.Config, info: *const 
         .debug_dir = debug_dir,
         .frames_done = &frames_done,
     };
-    try parallel.forEach(io, worker_count, ranges.len, &context, AnalysisContext.job);
+    // A job of this pass has one decoder and little other work.
+    try parallel.forEach(io, worker_count * decoders_per_worker, ranges.len, &context, AnalysisContext.job);
 
     // The cache is complete only after a run over the whole video.
     if (cache_dir) |dir| {
@@ -437,12 +442,89 @@ pub const RenderedDocument = struct {
     finger_pages: usize,
     /// The large blocks of working memory of all workers.
     memory: BlockCache.Stats,
+    /// The full-size frames that the decoders decoded, and the ones that a job
+    /// needed. The two are 0 when all frames came from the frame cache.
+    frames_decoded: usize,
+    frames_taken: usize,
 
     pub fn deinit(self: RenderedDocument, allocator: Allocator) void {
         for (self.pages) |page| page.deinit(allocator);
         allocator.free(self.pages);
     }
 };
+
+/// The work of the decoders for the full-size frames. The workers count together.
+pub const DecodeCounts = struct {
+    /// The frames that the decoders had to decode: each frame from a keyframe to
+    /// the last frame that a job needed.
+    decoded: std.atomic.Value(usize) = .init(0),
+    /// The frames that came through a pipe: the frames that a job needed.
+    taken: std.atomic.Value(usize) = .init(0),
+};
+
+/// One run of a decoder: it starts at a keyframe and gives frames up to the next
+/// keyframe that lies between two of the frames to load.
+const DecoderRun = struct {
+    /// The keyframe where the decoder starts.
+    first: u32,
+    /// The frames of this run are `indexes[from..to]` of the load.
+    from: usize,
+    to: usize,
+    /// The missing frames of the run are `offsets[offsets_from..offsets_to]` of
+    /// the plan, as offsets from the keyframe.
+    offsets_from: usize,
+    offsets_to: usize,
+};
+
+const DecoderPlan = struct {
+    runs: []DecoderRun,
+    offsets: []u32,
+
+    fn deinit(self: DecoderPlan, allocator: Allocator) void {
+        allocator.free(self.runs);
+        allocator.free(self.offsets);
+    }
+};
+
+/// Split the frames `indexes` that are not loaded into decoder runs. `indexes` is
+/// in rising order.
+fn planDecoderRuns(allocator: Allocator, info: *const ffmpeg.VideoInfo, indexes: []const u32, loaded: []const bool) Allocator.Error!DecoderPlan {
+    var runs: std.ArrayList(DecoderRun) = .empty;
+    errdefer runs.deinit(allocator);
+    var offsets: std.ArrayList(u32) = .empty;
+    errdefer offsets.deinit(allocator);
+    var position: usize = 0;
+    while (position < indexes.len) {
+        if (loaded[position]) {
+            position += 1;
+            continue;
+        }
+        const first: u32 = @intCast(info.keyframeAtOrBefore(indexes[position]));
+        var last_position = position;
+        var scan = position + 1;
+        while (scan < indexes.len) : (scan += 1) {
+            if (loaded[scan]) continue;
+            // A frame after a later keyframe starts faster from that keyframe.
+            if (info.keyframeAtOrBefore(indexes[scan]) > indexes[last_position]) break;
+            last_position = scan;
+        }
+        const offsets_from = offsets.items.len;
+        for (indexes[position .. last_position + 1], loaded[position .. last_position + 1]) |frame_index, done| {
+            if (!done) try offsets.append(allocator, frame_index - first);
+        }
+        try runs.append(allocator, .{
+            .first = first,
+            .from = position,
+            .to = last_position + 1,
+            .offsets_from = offsets_from,
+            .offsets_to = offsets.items.len,
+        });
+        position = last_position + 1;
+    }
+    const owned_runs = try runs.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_runs);
+    return .{ .runs = owned_runs, .offsets = try offsets.toOwnedSlice(allocator) };
+}
 
 /// Full-size frames by index: from the cache directory, or decoded with ffmpeg.
 const FrameStore = struct {
@@ -451,6 +533,7 @@ const FrameStore = struct {
     config: *const args.Config,
     info: *const ffmpeg.VideoInfo,
     cache_dir: ?Io.Dir,
+    counts: *DecodeCounts,
 
     fn frameBytes(self: *const FrameStore) usize {
         return image.packedFrameSize(self.info.width, self.info.height);
@@ -477,45 +560,48 @@ const FrameStore = struct {
             }
         }
 
-        // One decoder run gives all missing frames up to the next keyframe that
-        // lies between two of them.
-        var position: usize = 0;
-        while (position < indexes.len) {
-            if (loaded[position]) {
-                position += 1;
-                continue;
+        const plan = try planDecoderRuns(self.gpa, self.info, indexes, loaded);
+        defer plan.deinit(self.gpa);
+        const runs = plan.runs;
+
+        const readers = try self.gpa.alloc(?*ffmpeg.FrameReader, runs.len);
+        defer self.gpa.free(readers);
+        @memset(readers, null);
+        defer for (readers) |maybe_reader| if (maybe_reader) |reader| reader.close();
+        var opened: usize = 0;
+        for (runs, 0..) |run, run_index| {
+            // The decoders of the next runs start now. A decoder must decode each
+            // frame from its keyframe to its first frame, and it does that while
+            // this run gives its frames.
+            while (opened < runs.len and opened < run_index + decoders_per_worker) : (opened += 1) {
+                const next = runs[opened];
+                const frame_count = indexes[next.to - 1] - next.first + 1;
+                // The decoder gives only the missing frames of the run, not each
+                // frame from the keyframe.
+                readers[opened] = try ffmpeg.FrameReader.open(self.io, self.gpa, self.info, .{
+                    .ffmpeg = self.config.ffmpeg,
+                    .hwaccel = self.config.hwaccel,
+                    .video = self.config.input,
+                    .first_frame = next.first,
+                    .frame_count = frame_count,
+                    .select = plan.offsets[next.offsets_from..next.offsets_to],
+                });
+                _ = self.counts.decoded.fetchAdd(frame_count, .monotonic);
             }
-            const first = self.info.keyframeAtOrBefore(indexes[position]);
-            var last_position = position;
-            var scan = position + 1;
-            while (scan < indexes.len) : (scan += 1) {
-                if (loaded[scan]) continue;
-                // A frame after a later keyframe starts faster from that keyframe.
-                if (self.info.keyframeAtOrBefore(indexes[scan]) > indexes[last_position]) break;
-                last_position = scan;
-            }
-            const last_frame = indexes[last_position];
-            const reader = try ffmpeg.FrameReader.open(self.io, self.gpa, self.info, .{
-                .ffmpeg = self.config.ffmpeg,
-                .hwaccel = self.config.hwaccel,
-                .video = self.config.input,
-                .first_frame = first,
-                .frame_count = last_frame - first + 1,
-            });
-            defer reader.close();
-            var want = position;
-            for (first..last_frame + 1) |frame_index| {
+            const reader = readers[run_index].?;
+            for (indexes[run.from..run.to], buffers[run.from..run.to], loaded[run.from..run.to]) |frame_index, buffer, *done| {
+                if (done.*) continue;
+                // The packet list can name more frames than the decoder gives.
                 _ = (try reader.next()) orelse break;
-                while (want <= last_position and (loaded[want] or indexes[want] < frame_index)) want += 1;
-                if (want > last_position) break;
-                if (indexes[want] != frame_index) continue;
-                @memcpy(buffers[want], reader.frameBytes());
-                loaded[want] = true;
+                @memcpy(buffer, reader.frameBytes());
+                done.* = true;
+                _ = self.counts.taken.fetchAdd(1, .monotonic);
                 if (self.cache_dir) |dir| {
-                    try dir.writeFile(self.io, .{ .sub_path = try self.cacheName(&name_buffer, frame_index), .data = buffers[want] });
+                    try dir.writeFile(self.io, .{ .sub_path = try self.cacheName(&name_buffer, frame_index), .data = buffer });
                 }
             }
-            position = last_position + 1;
+            reader.close();
+            readers[run_index] = null;
         }
         for (loaded, indexes) |done, frame_index| {
             if (!done) {
@@ -653,59 +739,39 @@ const RenderContext = struct {
 
     fn job(self: *const RenderContext, worker: usize, plan_index: usize) anyerror!void {
         const plan = self.plans[plan_index];
+        const store = self.store;
+        const gpa = store.gpa;
         const memory = self.caches[worker].allocator();
         const page_count = self.segments[plan.segment].kind.pageCount();
 
         var result: SpreadResult = .{};
-        errdefer result.deinit(self.store.gpa);
+        errdefer result.deinit(gpa);
         // Pages with the same reference frame share the donor frames and one render call.
         var shared = true;
         for (plan.references[0..page_count]) |reference| shared = shared and reference.frame == plan.references[0].frame;
-        if (shared) {
-            try self.renderPages(memory, plan_index, plan.references[0].frame, null, &result);
-        } else {
-            for (0..page_count) |page_index| {
-                try self.renderPages(memory, plan_index, plan.references[page_index].frame, page_index, &result);
-            }
+        const call_count: usize = if (shared) 1 else page_count;
+
+        var call_frames: [fastscan.detect.max_pages][]u32 = @splat(&.{});
+        defer for (call_frames) |frames| gpa.free(frames);
+        var all: std.ArrayList(u32) = .empty;
+        defer all.deinit(gpa);
+        for (call_frames[0..call_count], 0..) |*frames, call| {
+            frames.* = try self.framesOfCall(plan_index, plan.references[call].frame, if (shared) null else call);
+            try all.appendSlice(gpa, frames.*);
         }
-        self.results[plan_index] = result;
-    }
 
-    /// Render one page of a spread from its reference frame, or all pages when
-    /// `only_page` is null, and put the encoded pages into `result`. `memory` gives
-    /// the frames and the working memory; the encoded pages come from the general
-    /// allocator, because they stay after the job.
-    fn renderPages(
-        self: *const RenderContext,
-        memory: Allocator,
-        plan_index: usize,
-        reference_index: u32,
-        only_page: ?usize,
-        result: *SpreadResult,
-    ) anyerror!void {
-        const store = self.store;
-        const gpa = store.gpa;
-        const plan = self.plans[plan_index];
-        const segment = self.segments[plan.segment];
-
-        const donors = try fastscan.timeline.selectDonors(
-            gpa,
-            self.analysis.observations,
-            plan.spans[0..plan.span_count],
-            reference_index,
-            only_page,
-            self.donor_options,
-        );
-        defer gpa.free(donors);
-
-        // The reference frame and the donor frames, in the order of the video.
-        const frame_count = donors.len + 1;
-        const indexes = try gpa.alloc(u32, frame_count);
-        defer gpa.free(indexes);
-        indexes[0] = reference_index;
-        @memcpy(indexes[1..], donors);
-        std.mem.sort(u32, indexes, {}, std.sort.asc(u32));
-        const buffers = try gpa.alloc([]u8, frame_count);
+        // One load for all the calls. The pages of a spread take their frames from
+        // the same seconds of the video, and a decoder must decode each frame from
+        // a keyframe to the frame that a call needs: the calls share that work.
+        std.mem.sort(u32, all.items, {}, std.sort.asc(u32));
+        var unique: usize = 0;
+        for (all.items) |frame_index| {
+            if (unique > 0 and all.items[unique - 1] == frame_index) continue;
+            all.items[unique] = frame_index;
+            unique += 1;
+        }
+        const indexes = all.items[0..unique];
+        const buffers = try gpa.alloc([]u8, indexes.len);
         defer gpa.free(buffers);
         var allocated: usize = 0;
         defer for (buffers[0..allocated]) |buffer| memory.free(buffer);
@@ -715,12 +781,61 @@ const RenderContext = struct {
         }
         try store.load(indexes, buffers);
 
+        for (call_frames[0..call_count], 0..) |frames, call| {
+            try self.renderPages(memory, plan_index, plan.references[call].frame, if (shared) null else call, frames, indexes, buffers, &result);
+        }
+        self.results[plan_index] = result;
+    }
+
+    /// The frames of one render call: the reference frame and its donor frames, in
+    /// the order of the video. The caller frees the list.
+    fn framesOfCall(self: *const RenderContext, plan_index: usize, reference_index: u32, only_page: ?usize) ![]u32 {
+        const gpa = self.store.gpa;
+        const plan = self.plans[plan_index];
+        const donors = try fastscan.timeline.selectDonors(
+            gpa,
+            self.analysis.observations,
+            plan.spans[0..plan.span_count],
+            reference_index,
+            only_page,
+            self.donor_options,
+        );
+        defer gpa.free(donors);
+        const frames = try gpa.alloc(u32, donors.len + 1);
+        frames[0] = reference_index;
+        @memcpy(frames[1..], donors);
+        std.mem.sort(u32, frames, {}, std.sort.asc(u32));
+        return frames;
+    }
+
+    /// Render one page of a spread from its reference frame, or all pages when
+    /// `only_page` is null, and put the encoded pages into `result`. `frames` are
+    /// the frames of this call; `buffers[i]` holds the frame `loaded[i]`. `memory`
+    /// gives the working memory; the encoded pages come from the general
+    /// allocator, because they stay after the job.
+    fn renderPages(
+        self: *const RenderContext,
+        memory: Allocator,
+        plan_index: usize,
+        reference_index: u32,
+        only_page: ?usize,
+        frames: []const u32,
+        loaded: []const u32,
+        buffers: []const []u8,
+        result: *SpreadResult,
+    ) anyerror!void {
+        const store = self.store;
+        const gpa = store.gpa;
+        const plan = self.plans[plan_index];
+        const segment = self.segments[plan.segment];
+
         var reference: fastscan.render.SourceFrame = undefined;
-        const donor_sources = try gpa.alloc(fastscan.render.SourceFrame, donors.len);
+        const donor_sources = try gpa.alloc(fastscan.render.SourceFrame, frames.len - 1);
         defer gpa.free(donor_sources);
         var donor_count: usize = 0;
-        for (indexes, buffers) |frame_index, buffer| {
-            const source = store.source(self.analysis, frame_index, buffer);
+        for (frames) |frame_index| {
+            const position = std.mem.indexOfScalar(u32, loaded, frame_index).?;
+            const source = store.source(self.analysis, frame_index, buffers[position]);
             if (frame_index == reference_index) {
                 reference = source;
             } else {
@@ -806,9 +921,12 @@ pub fn renderDocument(
         if (config.debug_layers) try dir.createDirPath(io, debug_layers_dir);
     }
 
-    const store: FrameStore = .{ .io = io, .gpa = gpa, .config = config, .info = info, .cache_dir = cache_dir };
-    // Each worker keeps its large blocks from one job to the next one.
-    const caches = try gpa.alloc(BlockCache, @max(1, worker_count));
+    var decode_counts: DecodeCounts = .{};
+    const store: FrameStore = .{ .io = io, .gpa = gpa, .config = config, .info = info, .cache_dir = cache_dir, .counts = &decode_counts };
+    // Each worker keeps its large blocks from one job to the next one. The
+    // signature step has more workers than the render step: its jobs are small.
+    const signature_workers = @max(1, worker_count) * decoders_per_worker;
+    const caches = try gpa.alloc(BlockCache, signature_workers);
     defer gpa.free(caches);
     for (caches) |*cache| cache.* = .init(gpa);
     defer for (caches) |*cache| cache.deinit();
@@ -835,7 +953,9 @@ pub fn renderDocument(
         .results = signature_results,
         .caches = caches,
     };
-    try parallel.forEach(io, worker_count, segments.len, &signature_context, SignatureContext.job);
+    try parallel.forEach(io, signature_workers, segments.len, &signature_context, SignatureContext.job);
+    // The render step uses the first caches only, and it needs other block sizes.
+    for (caches) |*cache| cache.release();
 
     // Step 2: spreads that register with each other are one spread.
     var candidates: std.ArrayList(fastscan.dedup.Candidate) = .empty;
@@ -965,6 +1085,8 @@ pub fn renderDocument(
         .finger_left = 0,
         .finger_pages = 0,
         .memory = .{},
+        .frames_decoded = decode_counts.decoded.load(.monotonic),
+        .frames_taken = decode_counts.taken.load(.monotonic),
     };
     for (caches) |*cache| document.memory.add(cache.stats);
     var pages: std.ArrayList(fastscan.render.EncodedPage) = .empty;
@@ -1131,6 +1253,48 @@ test "ranges start at keyframes and cover all frames" {
     try testing.expectEqual(@as(usize, 2), ranges.len);
     try testing.expectEqual(FrameRange{ .first = 0, .count = 6 }, ranges[0]);
     try testing.expectEqual(FrameRange{ .first = 6, .count = 4 }, ranges[1]);
+}
+
+test "a decoder run has the missing frames between two keyframes" {
+    // A keyframe at each tenth frame.
+    var frames: [40]ffmpeg.FrameEntry = undefined;
+    for (&frames, 0..) |*frame, index| frame.* = .{ .pts = @intCast(index), .key = index % 10 == 0 };
+    const info: ffmpeg.VideoInfo = .{
+        .width = 64,
+        .height = 36,
+        .colorimetry = .{},
+        .time_base_numerator = 1,
+        .time_base_denominator = 30,
+        .frames = &frames,
+    };
+    // Frame 14 is there already. Frames 3 and 7, and frames 12 and 19, share a
+    // keyframe. No frame of the keyframe at 20 is in the list.
+    const indexes = [_]u32{ 3, 7, 12, 14, 19, 35 };
+    const loaded = [_]bool{ false, false, false, true, false, false };
+    const plan = try planDecoderRuns(testing.allocator, &info, &indexes, &loaded);
+    defer plan.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 3), plan.runs.len);
+    try testing.expectEqual(DecoderRun{ .first = 0, .from = 0, .to = 2, .offsets_from = 0, .offsets_to = 2 }, plan.runs[0]);
+    try testing.expectEqual(DecoderRun{ .first = 10, .from = 2, .to = 5, .offsets_from = 2, .offsets_to = 4 }, plan.runs[1]);
+    try testing.expectEqual(DecoderRun{ .first = 30, .from = 5, .to = 6, .offsets_from = 4, .offsets_to = 5 }, plan.runs[2]);
+    try testing.expectEqualSlices(u32, &.{ 3, 7, 2, 9, 5 }, plan.offsets);
+}
+
+test "no decoder run when each frame is there" {
+    var frames: [10]ffmpeg.FrameEntry = undefined;
+    for (&frames, 0..) |*frame, index| frame.* = .{ .pts = @intCast(index), .key = index == 0 };
+    const info: ffmpeg.VideoInfo = .{
+        .width = 64,
+        .height = 36,
+        .colorimetry = .{},
+        .time_base_numerator = 1,
+        .time_base_denominator = 30,
+        .frames = &frames,
+    };
+    const plan = try planDecoderRuns(testing.allocator, &info, &.{ 2, 5 }, &.{ true, true });
+    defer plan.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), plan.runs.len);
 }
 
 test "the analysis size keeps the aspect ratio and has even sides" {

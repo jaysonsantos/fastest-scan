@@ -4,6 +4,7 @@
 #
 #   scripts/bench.sh                 # every 4th page goes through OCR
 #   BENCH_OCR_STEP=1 scripts/bench.sh
+#   BENCH_NO_CACHE=1 scripts/bench.sh # no frame cache: the time that a user gets
 #
 # The video is not in the repository. FASTEST_SCAN_BENCH_VIDEO names it.
 # Needs ffmpeg, pdfimages (poppler), and tesseract, from the nix shell.
@@ -22,6 +23,8 @@ readonly OCR_STEP="${BENCH_OCR_STEP:-4}"
 readonly OCR_LANGUAGE="${BENCH_OCR_LANGUAGE:-eng}"
 readonly OUT_DIR=out/bench
 readonly CACHE_DIR="${FASTEST_SCAN_CACHE_DIR:-.cache}"
+# With a value other than 0, the decoders give each frame: the run has no cache.
+readonly NO_CACHE="${BENCH_NO_CACHE:-0}"
 readonly PDF="$OUT_DIR/bench.pdf"
 readonly PAGES_DIR="$OUT_DIR/pages"
 # tesseract writes one line per word; column 11 is the confidence, column 12 the text.
@@ -42,8 +45,15 @@ scripts/build.sh
 rm -rf "$OUT_DIR"
 mkdir -p "$PAGES_DIR"
 
+cache_arguments=(--cache-dir "$CACHE_DIR")
+cache_note="frame cache: $CACHE_DIR"
+if [[ $NO_CACHE != 0 ]]; then
+  cache_arguments=()
+  cache_note="no frame cache"
+fi
+
 start_seconds=$(date +%s.%N)
-zig-out/bin/fastest-scan "$VIDEO" -o "$PDF" --cache-dir "$CACHE_DIR" --verbose 2>&1 |
+zig-out/bin/fastest-scan "$VIDEO" -o "$PDF" "${cache_arguments[@]}" --verbose 2>&1 |
   grep --invert-match --extended-regexp 'PPS changed|Last message repeated' || true
 end_seconds=$(date +%s.%N)
 run_seconds=$(awk "BEGIN { printf \"%.1f\", $end_seconds - $start_seconds }")
@@ -77,7 +87,7 @@ echo
 echo "benchmark result"
 echo "  video              $VIDEO"
 echo "  pages              $page_count (expected $EXPECTED_PAGES)"
-echo "  run time           $run_seconds s (frame cache: $CACHE_DIR)"
+echo "  run time           $run_seconds s ($cache_note)"
 echo "  PDF size           $pdf_bytes bytes"
 echo "  bytes per page     $((pdf_bytes / (page_count > 0 ? page_count : 1)))"
 echo "  OCR pages          $ocr_pages (every ${OCR_STEP}th page, language $OCR_LANGUAGE)"

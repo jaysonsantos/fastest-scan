@@ -31,8 +31,9 @@ zig-out/bin/fastest-scan ~/VID_20261009_180010.mp4 -o out/bench.pdf -v \
 
 Result on 2026-10-12: 63 pages of 1292 x 1868 pixels, 13.1 MB. 63 pages is the
 expected count: the cover and 31 spreads, in the order of the booklet. The run
-takes about 29 s with a warm frame cache, on a machine that does no other work.
-`docs/benchmark-log.md` has the numbers of each step.
+takes 92 s. With all frames in a cache (`--cache-dir`), it takes 28 s: that is the
+time for the work on the program. The two times are for a machine that does no
+other work. `docs/benchmark-log.md` has the numbers of each step.
 
 Each page comes from its own reference frame: the frame of the spread that shows
 the most ink of that page (decision 0013). Up to 9 other frames repair it, 3 of
@@ -113,27 +114,25 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
    - Fingers: done (decisions 0014 and 0018). What is left: a video of the user
      in other light, sizes that scale with the page width for videos below
      1080p, and a thin strip of the desk at a page edge.
-5. **Speed.** Done in a second form. Decision 0015: a donor frame takes the page
+5. **Speed.** Done in a third form. Decision 0015: a donor frame takes the page
    corners of the first pass, and the warp, the registration, and the flatten
    step have vector code. Decision 0017: each worker keeps its large blocks of
-   memory, which brings the system time from 20 s to 8 s. The render pass takes
-   about 22 s of the 29 s. What is left:
-   - The page warp is about 40 % of the CPU time. The donors need the cubic only
-     in the regions that they repair: a cheap warp can give the cell values.
-   - **A run with no frame cache takes 142 s**, and 117 s with hardware decode
-     (`--ffmpeg /usr/bin/ffmpeg --hwaccel vaapi`). That is the time that a user
-     gets; the 29 s are for the work on the program. The decoders use most of it:
-     the analysis pass takes 53 s in place of 6 s, the render pass 89 s in place
-     of 22 s. The render pass has 210 s of system time: the reader takes each
-     full-size frame from the pipe, also the frames between the keyframe and the
-     frame that it needs. Next: let `ffmpeg` give only the frames that a job
-     needs (the `select` filter).
-   - The render pass uses half of the CPU threads: the number of workers is the
-     number of decoders. With `--jobs 16` and a warm cache, the run takes 24 s and
-     9 GB of memory.
-   - Decode each range of frames one time for all of its donors, also with an
-     empty cache.
-   - A first pass on keyframes only.
+   memory. Decision 0020: a decoder has one thread and gives only the frames
+   that a job needs, which brings a run with no frame cache from 136 s to 92 s
+   (83 s with `--ffmpeg /usr/bin/ffmpeg --hwaccel vaapi`).
+   Of the 92 s, the analysis pass takes 41 s and the render pass 51 s. With all
+   frames in a cache, the two take 5 s and 23 s. What is left:
+   - The decode is the largest part. The analysis pass must decode each frame
+     (377 s of CPU time): the frames of this video are all reference frames, and
+     the hardware decoder is not faster than the CPU threads. The render pass
+     decodes 2622 frames for the 425 that it needs. Ideas: a cost per frame in
+     `timeline.selectDonors`, hardware and CPU decoders at the same time, or one
+     pass over the video (the stream session of the branch `android-app`).
+   - The page warp is about 40 % of the CPU time of the program itself. The
+     donors need the cubic only in the regions that they repair: a cheap warp can
+     give the cell values.
+   - The render pass uses half of the CPU threads for its own work. With
+     `--jobs 16` and a warm cache, the run takes 24 s and 9 GB of memory.
 6. **M4.**
    - Page curl: the map exists (`curl.zig`), but the page shape from the outline is
      not good enough (decision 0012). Next: the page shape from the parallax between

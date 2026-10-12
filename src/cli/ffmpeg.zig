@@ -200,10 +200,41 @@ pub const ReaderOptions = struct {
     video: []const u8,
     /// The first frame of the range. It must be a keyframe.
     first_frame: usize,
+    /// The number of frames of the range.
     frame_count: usize,
+    /// The frames of the range that the reader gives, as offsets from `first_frame`
+    /// in rising order. Null gives each frame of the range.
+    ///
+    /// The decoder must decode each frame from the keyframe to the last frame of
+    /// the list. With the list, only the listed frames go through the pipe: a
+    /// full-size frame of a 4K video has 12 MB.
+    select: ?[]const u32 = null,
     /// The size of the output frames. Null keeps the size of the video.
     scale: ?image.Size = null,
+    /// The number of threads of the decoder. 0 lets ffmpeg take one thread per
+    /// CPU thread.
+    ///
+    /// The default is one thread, because the readers run in parallel. On a 4K
+    /// HEVC video, a run of 26 frames takes 1.9 s of CPU time with one thread. With
+    /// 16 threads it takes 3.1 s of CPU time, 5 times the memory (700 MB), and
+    /// almost the same run time: the decoder decodes frames after the last frame
+    /// that it gives.
+    threads: usize = 1,
 };
+
+/// The `select` filter of ffmpeg for a list of frame numbers. `n` is the number of
+/// a frame at the input of the filter, from 0.
+fn selectFilter(allocator: Allocator, offsets: []const u32) Allocator.Error![]const u8 {
+    var filter: std.ArrayList(u8) = .empty;
+    errdefer filter.deinit(allocator);
+    try filter.appendSlice(allocator, "select='");
+    for (offsets, 0..) |offset, index| {
+        if (index > 0) try filter.append(allocator, '+');
+        try filter.print(allocator, "eq(n,{d})", .{offset});
+    }
+    try filter.append(allocator, '\'');
+    return filter.toOwnedSlice(allocator);
+}
 
 /// One `ffmpeg` process that decodes a range of frames into packed I420 buffers.
 pub const FrameReader = struct {
@@ -227,19 +258,30 @@ pub const FrameReader = struct {
         const arena = arena_state.allocator();
         var argv: std.ArrayList([]const u8) = .empty;
         try argv.appendSlice(arena, &.{ options.ffmpeg, "-v", "error", "-nostdin" });
+        if (options.threads > 0) try argv.appendSlice(arena, &.{ "-threads", try arena.print("{d}", .{options.threads}) });
         if (options.hwaccel) |name| try argv.appendSlice(arena, &.{ "-hwaccel", name });
         if (options.first_frame > 0) {
             const seek = info.seconds(options.first_frame) + seek_margin_seconds;
             try argv.appendSlice(arena, &.{ "-ss", try arena.print("{d:.6}", .{seek}), "-noaccurate_seek" });
         }
         try argv.appendSlice(arena, &.{ "-i", options.video, "-an", "-sn", "-dn" });
-        try argv.appendSlice(arena, &.{ "-frames:v", try arena.print("{d}", .{options.frame_count}) });
+        const output_count = if (options.select) |offsets| offsets.len else options.frame_count;
+        if (options.select) |offsets| {
+            std.debug.assert(offsets.len > 0 and offsets[offsets.len - 1] < options.frame_count);
+            for (offsets[1..], offsets[0 .. offsets.len - 1]) |later, earlier| std.debug.assert(later > earlier);
+        }
+        // ffmpeg stops the decoder after this number of output frames.
+        try argv.appendSlice(arena, &.{ "-frames:v", try arena.print("{d}", .{output_count}) });
         const width = if (options.scale) |size| size.width else info.width;
         const height = if (options.scale) |size| size.height else info.height;
+        var filters: std.ArrayList(u8) = .empty;
+        if (options.select) |offsets| try filters.appendSlice(arena, try selectFilter(arena, offsets));
         if (options.scale != null) {
+            if (filters.items.len > 0) try filters.append(arena, ',');
             // The area filter is a box filter: each output pixel is the mean of its source pixels.
-            try argv.appendSlice(arena, &.{ "-vf", try arena.print("scale={d}:{d}:flags=area", .{ width, height }) });
+            try filters.print(arena, "scale={d}:{d}:flags=area", .{ width, height });
         }
+        if (filters.items.len > 0) try argv.appendSlice(arena, &.{ "-vf", filters.items });
         // Without passthrough, ffmpeg duplicates or drops frames of a variable-rate video.
         try argv.appendSlice(arena, &.{ "-fps_mode", "passthrough", "-pix_fmt", "yuv420p", "-f", "rawvideo", "-" });
 
@@ -265,7 +307,7 @@ pub const FrameReader = struct {
             .width = width,
             .height = height,
             .colorimetry = info.colorimetry,
-            .remaining = options.frame_count,
+            .remaining = output_count,
         };
         self.file_reader = self.child.stdout.?.readerStreaming(io, self.pipe_buffer);
         return self;
@@ -304,6 +346,12 @@ pub const FrameReader = struct {
 // region: tests
 
 const testing = std.testing;
+
+test "the select filter names each frame of the list" {
+    const filter = try selectFilter(testing.allocator, &.{ 0, 7, 29 });
+    defer testing.allocator.free(filter);
+    try testing.expectEqualStrings("select='eq(n,0)+eq(n,7)+eq(n,29)'", filter);
+}
 
 test "parse the stream properties" {
     const text =
