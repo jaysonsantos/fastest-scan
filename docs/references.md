@@ -30,6 +30,7 @@ Rules:
 | C. Liu, M. Rubinstein, M. Krainin, and B. Freeman, "PhotoScan: Taking Glare-Free Pictures of Pictures", Google Research blog, 2017, <https://research.google/blog/photoscan-taking-glare-free-pictures-of-pictures/> | `src/lib/fuse.zig`, `src/lib/register.zig` | Glare is an outlier among registered frames of one subject, and the dark frames show the true content; a plane transform plus a coarse grid of shifts registers the frames. The fusion here keeps one reference frame and patches it; PhotoScan computes a soft minimum of all frames. |
 | L.-W. He and Z. Zhang, "Real-time whiteboard capture and processing using a video camera for remote collaboration", IEEE Transactions on Multimedia 9(1), 2007 (report MSR-TR-2004-91) | `src/lib/fuse.zig` | The comparison of frames works on cells, and a thing in front of the page is what differs from the stable content of a cell |
 | J. Kovač, P. Peer, and F. Solina, "Human skin colour clustering for face detection", EUROCON 2003 - Computer as a Tool, IEEE, vol. 2, 2003, pp. 144-148 | `src/lib/finger.zig`, `isSkin` | A pixel is skin when red is above green and above blue by fixed margins. The margins here are other values: they are for a flattened page with white paper at 1.0, and they come from the benchmark video (decision 0014). |
+| J. Yang, W. Lu, and A. Waibel, "Skin-color modeling and adaptation", Proceedings of the 3rd Asian Conference on Computer Vision (ACCV '98), vol. 2, 1998, pp. 687-694 (also report CMU-CS-97-146, Carnegie Mellon University, 1997) | `src/lib/finger.zig`, `isSkin` | The skin colours of different persons lie close together when the intensity is taken out. The test of a dark cell compares red minus green with red, not with a fixed value. The code has no colour model; its numbers come from the hands of the benchmark video and of the PUCIT videos (decision 0018). |
 | J. M. Tenenbaum, "Accommodation in computer vision", PhD thesis, Stanford University, 1970, and E. Krotkov, "Focusing", International Journal of Computer Vision 1(3), 1987, pp. 223-237 | `src/lib/fuse.zig`, `innerSharpness` | The sum of squared gradients as a measure of focus (the Tenengrad measure). The code compares the donor frames of one region with it; it uses plain differences of neighbour pixels and the smaller one of the two directions (decision 0016). |
 | V. Chvátal, "A greedy heuristic for the set-covering problem", Mathematics of Operations Research 4(3), 1979 | `src/lib/timeline.zig`, `selectDonors` | Each new donor frame is the one that repairs the most cells that still have too few donors |
 | ITU-T Recommendation T.81, "Digital compression and coding of continuous-tone still images", 1992 | `src/lib/jpeg.zig` | The JPEG format, the example quantization tables (Annex K.1), the Huffman table procedure (Annex K.2) |
@@ -47,6 +48,14 @@ These sources shaped a design. The project uses none of their code.
 | Source | Idea |
 |---|---|
 | ScanTailor by J. Artsimovich, GPL-3, <https://github.com/scantailor/scantailor> | A spread splits at a near-vertical line near its middle (`filters/page_split`). The fold search in `src/lib/detect.zig` has its own response and search. Also: a polynomial surface as the paper background, with dark cells rejected (`EstimateBackground`), in `src/lib/enhance.zig`. |
+
+## Data for checks
+
+No file of these sets is in the repository.
+
+| Source | Where | What |
+|---|---|---|
+| S. Tariq Dar and N. Khan, "Click-free, video-based document capture - methodology and evaluation", ICDAR 2017 workshops (CBDAR), pp. 21-26, DOI 10.1109/ICDAR.2017.344. Data: <http://faculty.pucit.edu.pk/nazarkhan/datasets/pucit_page_turns.zip> | `docs/decisions/0018-skin-test-for-dark-hands.md`, `prototypes/fingers/skin_samples.py` | 37 videos of books with page turns and the hands of other persons (the PUCIT set). The colours of the hands in six of these videos gave the numbers of the skin test for dark cells. |
 
 ## Patents to know
 

@@ -23,3 +23,4 @@ replaces it and name the old file in the new one.
 | [0015](0015-donor-corners-from-the-first-pass.md) | A donor frame takes the page corners of the first pass; the hot loops use vector code |
 | [0016](0016-sharp-donor-in-the-region.md) | A region takes the donor that is sharp in the region |
 | [0017](0017-worker-memory-from-a-block-cache.md) | A worker keeps its large blocks of memory |
+| [0018](0018-skin-test-for-dark-hands.md) | The skin test accepts dark hands and skin in a shadow |

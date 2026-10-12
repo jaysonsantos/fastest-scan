@@ -3,9 +3,11 @@
 //!
 //! The input is a flattened page (`enhance.flatten`): blank paper is at 1.0.
 //!
-//! - A cell has the colour of skin when red is above green by a fixed amount and
-//!   blue is not above red. Gold print and paper in warm light are more yellow
-//!   than skin, a header bar is darker, and text has texture.
+//! - A cell has the colour of skin when red is above green and blue is not above
+//!   red. A bright cell needs a fixed amount more red than green. A dark cell
+//!   needs a fixed fraction of its red: a shadow and a dark skin tone lower the
+//!   two colours by one factor. Gold print and paper in warm light are more
+//!   yellow than skin, a header bar is darker, and text has texture.
 //! - A finger is a wide blob of such cells that comes in from the border of the
 //!   page or from the border of the frame. A printed picture with the colour of
 //!   skin does not touch the border. The wood of a desk that shows at a round
@@ -18,11 +20,17 @@
 //!   that shows next to the finger stays. The paint cannot know what is below the
 //!   finger: see `docs/decisions/0014-paint-over-fingers.md`.
 //!
-//! Source of the idea:
+//! Sources of the ideas:
 //! - J. Kovač, P. Peer, and F. Solina, "Human skin colour clustering for face
 //!   detection", EUROCON 2003: a pixel is skin when red is above green and above
 //!   blue by fixed margins. The margins here are other values: they are for a page
 //!   with white paper at 1.0, and they were measured on the benchmark video.
+//! - J. Yang, W. Lu, and A. Waibel, "Skin-color modeling and adaptation", ACCV
+//!   1998: the skin colours of different persons lie close together when the
+//!   intensity is taken out. So the test of a dark cell compares red minus green
+//!   with red. The numbers were measured on the benchmark video and on the
+//!   page-turn videos of S. Tariq Dar and N. Khan, ICDAR 2017 workshops: see
+//!   `docs/decisions/0018-skin-test-for-dark-hands.md`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -50,14 +58,31 @@ pub const Options = struct {
     /// Skin has this much more red than green, on the scale where paper is 1.0.
     /// Black ink is neutral.
     min_red_over_green: f32 = 0.08,
+    /// A dark cell needs less: a shadow, and a dark skin tone, lower red and green
+    /// by one factor, so the difference falls with them. Red minus green is then
+    /// at least this fraction of red. On the hands of three videos the fraction
+    /// is 0.26 to 0.36 at each luma, see decision 0018.
+    min_red_fraction: f32 = 0.12,
+    /// But a cell always needs this much more red than green. Below this value,
+    /// the tint of a dark cell is the noise of the video compression.
+    min_dark_red_over_green: f32 = 0.04,
     /// Skin has blue at most this much above red. A finger in a shadow looks lilac
     /// after the flatten step; print that is blue or violet has more blue.
     max_blue_over_red: f32 = 0.05,
     /// Skin is more red than yellow: green minus blue is at most red minus green
     /// plus this value. Gold print and paper in warm light are more yellow.
     max_yellow_excess: f32 = 0.05,
-    /// A cell with a mean luma below this is too dark for skin: it is print.
-    min_luma: f32 = 0.25,
+    /// A cell with a mean luma below this is too dark for skin: it is print. A
+    /// hand with a dark skin tone, or the shadow between two fingers, goes down
+    /// to this value.
+    min_luma: f32 = 0.15,
+    /// A cell with a mean luma below this is dark. It can be skin, and it can be
+    /// black print with glare on it, which has the gold tint of the lamp.
+    dark_luma: f32 = 0.25,
+    /// So a dark cell must be more red than that: green minus blue is at most this
+    /// fraction of red minus green. On dark skin the fraction is 0.3 to 0.7; on a
+    /// black bar with glare it is 0.75 to 1.35.
+    max_dark_yellow_fraction: f32 = 0.75,
     /// A cell with a mean luma above this is paper.
     max_luma: f32 = 0.92,
     /// Skin has no texture: the luma in a cell changes by this much at most.
@@ -244,9 +269,18 @@ fn isSkin(mean: [channels]f32, contrast: f32, options: Options) bool {
     const red_over_green = mean[0] - mean[1];
     const green_over_blue = mean[1] - mean[2];
     const luma = color.rgbLuma(mean);
-    return red_over_green >= options.min_red_over_green and
+    const needed_red_over_green = std.math.clamp(
+        options.min_red_fraction * mean[0],
+        options.min_dark_red_over_green,
+        options.min_red_over_green,
+    );
+    const max_green_over_blue = if (luma < options.dark_luma)
+        options.max_dark_yellow_fraction * red_over_green
+    else
+        red_over_green + options.max_yellow_excess;
+    return red_over_green >= needed_red_over_green and
         mean[2] - mean[0] <= options.max_blue_over_red and
-        green_over_blue <= red_over_green + options.max_yellow_excess and
+        green_over_blue <= max_green_over_blue and
         luma >= options.min_luma and
         luma <= options.max_luma and
         contrast <= options.max_cell_contrast;
@@ -783,6 +817,7 @@ const testing = std.testing;
 
 const test_cell = 8;
 const test_skin = [channels]f32{ 0.7, 0.45, 0.4 };
+const test_dark_skin = [channels]f32{ 0.3, 0.2, 0.15 };
 
 fn testPage(allocator: Allocator) !RgbF32 {
     const page = try RgbF32.init(allocator, 320, 400);
@@ -857,6 +892,47 @@ test "gold print, warm paper, a dark bar, and text are not skin" {
     const mask = try testFind(page, null);
     defer mask.deinit(testing.allocator);
     for (mask.covered) |covered| try testing.expect(!covered);
+}
+
+test "a hand with a dark skin tone is a finger" {
+    const page = try testPage(testing.allocator);
+    defer page.deinit(testing.allocator);
+    // The colour of the dark cells of the hands in the PUCIT videos: red minus
+    // green is 0.3 of red, and the luma is below the limit of decision 0014.
+    fill(page, 0, 80, 200, 280, test_dark_skin);
+
+    const mask = try testFind(page, null);
+    defer mask.deinit(testing.allocator);
+    try testing.expect(mask.skin[cellAt(page, 40, 240)]);
+    try testing.expect(mask.finger[cellAt(page, 40, 240)]);
+}
+
+test "the red that skin needs falls with the red of the cell" {
+    const options: Options = .{};
+    const no_texture = 0;
+    // Skin in the light, in a shadow, and with a dark tone: the same fraction of red.
+    try testing.expect(isSkin(test_skin, no_texture, options));
+    try testing.expect(isSkin(.{ 0.5, 0.36, 0.3 }, no_texture, options));
+    try testing.expect(isSkin(test_dark_skin, no_texture, options));
+    // A shadow on paper has a weak tint: too little red for its brightness.
+    try testing.expect(!isSkin(.{ 0.5, 0.46, 0.44 }, no_texture, options));
+    // Paper in warm light is bright, so it needs the full difference.
+    try testing.expect(!isSkin(.{ 0.98, 0.91, 0.77 }, no_texture, options));
+    // A weak tint of a dark cell is noise of the video compression.
+    try testing.expect(!isSkin(.{ 0.22, 0.19, 0.17 }, no_texture, options));
+}
+
+test "a dark cell is skin only when it is more red than yellow" {
+    const options: Options = .{};
+    const no_texture = 0;
+    // The end of a black header bar with glare on it, from the benchmark video:
+    // as dark as dark skin and with as much red, but with the gold tint of the lamp.
+    const bar_with_glare = [channels]f32{ 0.31, 0.23, 0.14 };
+    try testing.expect(color.rgbLuma(bar_with_glare) < options.dark_luma);
+    try testing.expect(!isSkin(bar_with_glare, no_texture, options));
+    try testing.expect(isSkin(test_dark_skin, no_texture, options));
+    // In a brighter cell the same tint can be skin: the lamp makes skin more yellow.
+    try testing.expect(isSkin(.{ 0.62, 0.46, 0.28 }, no_texture, options));
 }
 
 test "a thin strip of the desk at the edge of the page is not a finger" {

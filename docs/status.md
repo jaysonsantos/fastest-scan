@@ -70,7 +70,7 @@ finger is lost: `--fingers blank` and `--fingers keep` change the rule.
 | `register.zig`: tile alignment on a pyramid, robust plane transform | Done, tested |
 | `dedup.zig`: spreads that register with each other are one spread | Done, tested. Removes the 10 duplicate views of the benchmark. |
 | `fuse.zig`: repair of the reference page with donor frames, with a patch check against the reference | Works on the benchmark, with the problems below. Tested with synthetic pages. |
-| `finger.zig`: the finger mask of a frame (skin, a wide blob from a border, margin, halo), and the paint over a finger that stays | Works on the benchmark. Tested with synthetic pages. The skin numbers come from one video. |
+| `finger.zig`: the finger mask of a frame (skin, a wide blob from a border, margin, halo), and the paint over a finger that stays | Works on the benchmark. Tested with synthetic pages. The skin numbers come from the benchmark and from the hands of six public videos (decision 0018). |
 | `timeline.chooseReference`: the reference frame of each page by the ink that it shows | Done, tested |
 | `timeline.selectDonors`: donor frames by what they repair, also frames that cut a page | Done, tested |
 | `render.alignDonor`: registration of a donor in rounds | Done. No test for the rounds alone. |
@@ -110,8 +110,9 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
      bends. Use a shift per part of the region.
    - A finer glare mask: `docs/research/fusion-prototype.md` repairs single words
      that the 8 px cells here do not find.
-   - Fingers: done (decision 0014). What is left: skin numbers from more videos,
-     and a thin strip of the desk at a page edge.
+   - Fingers: done (decisions 0014 and 0018). What is left: a video of the user
+     in other light, sizes that scale with the page width for videos below
+     1080p, and a thin strip of the desk at a page edge.
 5. **Speed.** Done in a second form. Decision 0015: a donor frame takes the page
    corners of the first pass, and the warp, the registration, and the flatten
    step have vector code. Decision 0017: each worker keeps its large blocks of
@@ -138,7 +139,11 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
      not good enough (decision 0012). Next: the page shape from the parallax between
      frames, or from text lines. Then a benchmark video of a thick book.
    - A second benchmark for the page count: the PUCIT videos (37 videos with page
-     turns, see `docs/research/paper-notes.md`, paper 4).
+     turns, see `docs/research/paper-notes.md`, paper 4). The program runs on
+     them, and the page count is wrong on most: for example 7 pages where the
+     true number of page views is 17. The desk is bright, the videos have 480 x
+     270 pixels, and many books lie in a second direction. Decision 0018 has the
+     commands to get the videos.
    - Hough or line-segment detector for low-contrast desks, with the quad of the
      frame before as a prior (the best SmartDoc 2015 methods do this).
    - Complete C interface (`c_api.zig` has only the version).
@@ -156,9 +161,16 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
   the text below it is lost. A line of text then ends at the place of the finger,
   and the page does not show that a finger was there. On the benchmark this
   cuts the end of a line or a part of a drawing on some pages.
-- **The skin rule comes from one video.** Another skin tone or another light can
-  need other numbers. Print with the colour of skin and no texture that touches
-  the page border counts as a finger.
+- **The skin rule comes from few hands.** Its numbers are from the benchmark and
+  from six public videos with darker hands (decision 0018). No video has a very
+  pale or a very dark skin tone. Print with the colour of skin and no texture
+  that touches the page border counts as a finger.
+- **A whole hand on a page stays.** A finger mask larger than 15 % of the page is
+  not painted.
+- **Small videos.** The sizes of the finger rule are in cells of 8 pixels. On a
+  page below about 640 pixels in width, thin fingers stay.
+- **A copy of the benchmark at 1920 x 1080 gives 64 pages**, one duplicate spread
+  more than at the full size.
 - **A page that moves.** The page "Vielen Dank" (page 14) lifts from the desk in
   all of its frames: it is skewed and blurred.
 - **Curved pages.** A page that lifts from the desk gets curved text lines. The
