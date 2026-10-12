@@ -55,8 +55,8 @@ The code has two parts:
   bytes. It has a C interface (`include/fastscan.h`) for an Android app.
 - `src/cli/` is the program. It decodes the video with `ffmpeg` and calls the library.
 - `android/` is the Android app. It scans with the camera or from a recorded video.
-  It runs on the Android emulator, and it was not tested on a phone: read
-  `docs/android.md`.
+  It scans a recorded video on a phone. The camera mode was not tested with a
+  real book: read `docs/android.md`.
 
 The program has two flows. The default reads the video two times and jumps to
 the frames that it needs. `--stream` reads the video one time, in order, and

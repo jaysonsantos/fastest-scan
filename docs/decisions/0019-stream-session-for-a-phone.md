@@ -1,7 +1,8 @@
 # 0019: A stream session for a phone: each frame one time, pages while the video runs
 
-Date: 2026-10-12. Status: accepted. The app runs on the Android emulator. It did
-not run on a phone: see "What is not verified".
+Date: 2026-10-12. Status: accepted. The app scans a recorded video on one phone
+and on the Android emulator. No real book was scanned with the camera: see "What
+is not verified".
 
 This record adds a second flow to the library. The two passes of decision 0002
 stay the flow of the command-line program.
@@ -199,31 +200,38 @@ that decision moves the good words of a stream run by 3.
   70 s to 85 s of the 145 s to 178 s of a run. `ffmpeg` uses the other time: the
   stream mode has one decoder, which gives each frame at its full size.
 
-### On the Android emulator
+### On a phone and on the Android emulator
 
-The app on the emulator of the Android SDK (Android 16, `x86_64`, 8 CPU threads,
-8 GB of memory), with the defaults of the app: 4 + 2 donors, a limit of 24
-frames, a page height of 2000 pixels at most, and 2 render threads.
-`scripts/test-android.sh <video> 63` gives these numbers for the benchmark video:
+The app with its defaults: 4 + 2 donors, a limit of 24 frames, a page height of
+2000 pixels at most, and 2 render threads. `scripts/test-android.sh <video> 63`
+gives these numbers for the benchmark video, which has 180 s:
 
-| | Emulator |
-|---|---|
-| Pages (expected 63) | 63 |
-| Page size in pixels | 1424 x 2000 |
-| OCR on all pages: good words | 2308 |
-| Time until the last frame | 694 s: 139 ms for each frame |
-| Time until the last page | 698 s |
-| The first page is complete after | 21 s |
-| Full-size frames in memory, at most | 24 |
-| Native memory of the app, at most | 774 MB |
+| | Phone | Emulator |
+|---|---|---|
+| Device | REDMI Note 15 Pro+ 5G: Snapdragon 7s Gen 3, 8 GB, Android 16 | The emulator of the Android SDK: `x86_64`, 8 CPU threads, 8 GB, Android 16 |
+| Decoder | `c2.qti.hevc.decoder`, hardware | `c2.goldfish.hevc.decoder`, software |
+| Pages (expected 63) | 63 | 63 |
+| Page size in pixels | 1424 x 2000 | 1424 x 2000 |
+| OCR on all pages: good words | 2311 | 2308 |
+| Time for each frame: decode and session | 29 ms | 139 ms |
+| Time until the last frame | 146 s | 694 s |
+| Time until the last page | 151 s | 698 s |
+| The first page is complete after | 5 s | 21 s |
+| Full-size frames in memory, at most | 26 | 24 |
+| Native memory of the app, at most | 1137 MB | 774 MB |
 
-- The decoder of the emulator is a software decoder, and it uses most of the 139
-  ms. The time says nothing about a phone, which has a hardware decoder.
+- The phone is faster than the video: it takes 29 ms for a frame, and the video
+  has a frame each 36 ms. So a recorded video of 3840 x 2160 pixels needs less
+  time than its length. The same time is enough for a camera with 30 frames in a
+  second, but no run with the camera of a phone was made.
 - The pages come while the video runs: the render threads keep up, and the last
-  page is complete 4 s after the last frame.
-- The native memory is lower than the memory of the desktop program (1.2 GB),
-  because a render thread of the app gives its working memory back after each
-  job.
+  page is complete 5 s after the last frame.
+- The phone holds 1.1 GB of native memory at its peak. That is much for a phone
+  with 8 GB. The emulator holds less with the same settings; the cause is not
+  measured. A likely cause: the phone gives the frames five times faster, so the
+  two render threads work at the same time more often.
+- The time on the emulator says nothing about a phone: its software decoder uses
+  most of the 139 ms.
 - The camera of the emulator gives frames of 1856 x 1392 pixels, on their side
   (a rotation of 90 degrees). The library gets them and the screen shows the
   status of each frame. The camera shows a drawn scene and no book.
@@ -246,12 +254,13 @@ frames, a page height of 2000 pixels at most, and 2 render threads.
 
 ## What is not verified
 
-- No run on a phone. The library for `arm64-v8a` builds and links; it did not
-  run. These numbers are not known: the time of the analysis for one frame on a
-  phone, the time of a render job, and the frame rate and the frame size that
-  CameraX gives.
 - No scan of a real book with the camera. On the emulator, the camera source
-  gives its frames to the library, and no page comes from the drawn scene.
+  gives its frames to the library, and no page comes from the drawn scene. On
+  the phone, only the video source ran. These things are not known: the frame
+  size and the frame rate that CameraX gives on a phone, and the page outline on
+  the preview.
+- One phone model only. A phone with less memory or with a slower decoder can
+  fail where this one works.
 - The colour of camera frames: the app says full range and the BT.601 matrix for
   them, which is the common case and can be wrong for one phone.
 
@@ -265,6 +274,9 @@ The checks that did run:
 - On the emulator: the two device tests (a synthetic video, and the benchmark
   video with the decoder of the emulator), and the app by hand: a video opened
   from another app, the scan, and the PDF saved with the file dialog of Android.
+- On the phone: the benchmark video with the hardware decoder, through
+  `scripts/test-android.sh`. The pages of the PDF look like the pages of the
+  desktop program.
 
 ## Consequences
 

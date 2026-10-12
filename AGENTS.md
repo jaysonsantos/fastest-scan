@@ -110,7 +110,11 @@ Read `docs/status.md` first. It says what works, what does not, and what is next
   Android then deletes the files directory of the app: a video and a result that
   were there are gone. `scripts/test-android.sh` starts the video test with `adb`.
 - The `c2.goldfish.hevc.decoder` of the emulator decodes a 4K video at about 7
-  frames in a second. A test with the whole benchmark video takes 12 minutes.
+  frames in a second. A test with the whole benchmark video takes 12 minutes. A
+  phone with a hardware decoder takes 3 minutes.
+- A Xiaomi phone asks on its screen for each install over adb. With no answer in
+  about 10 seconds, the install fails. Do not answer the dialog with `adb shell
+  input`: it is there for the owner of the phone.
 - `ffmpeg` duplicates or drops frames of a variable-rate video unless the command has
   `-fps_mode passthrough`. The frame indexes then do not match the `ffprobe` list.
 - `ffmpeg -ss <t> -noaccurate_seek` starts at the keyframe at or before `t`. The CLI

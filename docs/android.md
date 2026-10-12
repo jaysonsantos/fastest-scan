@@ -4,10 +4,10 @@ The app in `android/` scans a book with the camera, or from a recorded video, an
 writes a PDF. It uses the stream session of the library: see
 `docs/decisions/0019-stream-session-for-a-phone.md`.
 
-State on 2026-10-12: the app builds and runs on the Android emulator. A recorded
-video gives its pages there, and the PDF is correct. **The app did not run on a
-phone, and no real book was scanned with the camera.** The list of what is not
-verified is in decision 0019.
+State on 2026-10-12: the app scans a recorded video on a phone (a REDMI Note 15
+Pro+ 5G) and on the Android emulator. The benchmark video gives its 63 pages on
+the two, and the PDF is correct. **No real book was scanned with the camera.** The
+list of what is not verified is in decision 0019.
 
 ## Parts
 
@@ -106,8 +106,21 @@ scripts/test-android.sh video.mp4 63       # a recorded video and its page count
   `scan-report.txt` to `out/android/`. The report has the page count, the time
   for a frame, the frames in memory, and the native memory.
 
-The benchmark video on the emulator gives 63 pages in 698 s: the software decoder
-of the emulator needs most of that time. Decision 0019 has the numbers.
+The benchmark video (180 s) gives 63 pages in 151 s on the phone, and in 698 s on
+the emulator: the software decoder of the emulator needs most of that time.
+Decision 0019 has the numbers.
+
+A phone with wireless debugging announces itself on the network. Find its address
+and connect:
+
+```sh
+avahi-browse --resolve --terminate _adb-tls-connect._tcp
+adb connect <address>:<port>
+```
+
+A Xiaomi phone asks on its screen for each install over adb ("Install via USB").
+The install fails when no person answers in about 10 seconds. The script installs
+two packages: the app and its tests.
 
 To try the app by hand on a device with no camera scene, give it a video from the
 shell. The app can read a file of its own directory:
@@ -151,12 +164,14 @@ adb shell am start -a android.intent.action.VIEW -t video/mp4 \
 
 A render thread gives its working memory back to the system after each job.
 
-With the defaults, the app on the emulator holds at most 774 MB of native memory
-for the benchmark video, with frames of 3840 x 2160 pixels. The desktop program
-holds 1.2 GB with the same settings: it keeps the working memory of its render
-threads. With one render thread, 2 other frames, and a limit of 16 frames, the
-desktop program holds 0.7 GB, and the pages are worse. The tables are in decision
-0019. The defaults are not tuned on a phone.
+With the defaults and frames of 3840 x 2160 pixels, the app holds at most 1137 MB
+of native memory on the phone, and 774 MB on the emulator. The desktop program
+holds 1.2 GB with the same settings. With one render thread, 2 other frames, and
+a limit of 16 frames, the desktop program holds 0.7 GB, and the pages are worse.
+The tables are in decision 0019.
+
+The defaults give the best pages. They are too high for a phone with little
+memory: no run with smaller settings was made on a phone.
 
 ## Limits
 
