@@ -22,6 +22,7 @@ Read `docs/status.md` first. It says what works, what does not, and what is next
 | `docs/decisions/` | One file per design decision, with the reason. |
 | `docs/research/` | The research behind the decisions, with sources. |
 | `docs/benchmark-log.md` | One row per benchmark run: page count, time, size, OCR numbers. |
+| `docs/images/` | The pictures of the README. Each one comes from a run of the program or of the app: `docs/images/README.md` says which run. |
 | `docs/references.md`, `docs/references.bib` | The credits: every paper, standard, and program that the code uses, as a table and as BibTeX. |
 | `prototypes/` | Python experiments that came before a part of the Zig code. A record, not product code. No linter checks it. |
 | `.forgejo/workflows/` | CI for the Forgejo host. The jobs run on the host of the runner (label `cachyos-nix`), not in a container. `.github/actionlint.yaml` holds only the actionlint config. |
@@ -61,7 +62,8 @@ Read `docs/status.md` first. It says what works, what does not, and what is next
 
 - Never commit a video, a decoded frame, or a benchmark output. `.gitignore` and the
   large-file hook block them. Keep such files in `.cache/`, `out/`, or outside the
-  repository.
+  repository. The only exception is `docs/images/`: the few small pictures of the
+  README. Look at each picture before the commit: it must show no private thing.
 - Use Zig 0.17. The standard library changed much between releases: read
   `docs/research/zig-toolchain.md` before you use an API from memory.
 - The library must not import `std.Io`, `std.fs`, `std.process`, or `std.Thread`.

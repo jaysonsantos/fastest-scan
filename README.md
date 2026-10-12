@@ -4,6 +4,18 @@ Film the pages of a book, a booklet, or a document with a phone. `fastest-scan`
 makes a PDF from the video: one page of the PDF for each page of the paper, cropped,
 flat, and without the bright reflection of a lamp.
 
+![One frame of a video with the outlines of two pages, and the same two pages in the PDF](docs/images/frame-to-pages.jpg)
+
+On the left is one frame of a video, with the two pages that the program finds.
+On the right are the two pages of the PDF for that spread. A lamp reflects on the
+right page of the frame, and fingers hold the booklet. The PDF has the print below
+the reflection from other frames of the same spread, and no finger.
+
+![An open book on a white desk with the outlines of two pages, and the two pages in the PDF with their colours](docs/images/colored-page.jpg)
+
+A page that is not white paper keeps its colours. Here the left page is the flap
+of a cover, and the book lies on a white desk.
+
 The work is in progress. `docs/status.md` says what works today.
 
 ## Run
@@ -21,6 +33,14 @@ it. The program cannot know what is below the finger: text there is lost. Keep t
 fingers on the margin of the page. `--fingers blank` paints a finger only when the
 paper around it is blank, and `--fingers keep` paints nothing.
 
+![The page of one frame, the page of the PDF, and the map of the repairs of that page](docs/images/repair.jpg)
+
+From the left: the page from one frame alone, the same page in the PDF, and the
+map of its repairs. Green is a reflection that other frames repaired. Yellow-green
+is a finger that got the colour of the paper. `--debug-dir DIR` writes such a map
+for each page, in `DIR/faults/`, and frames of the video with the page outlines, in
+`DIR/frames/`.
+
 ## Configure
 
 Each setting is a flag of the program. Run `fastest-scan --help` for the list.
@@ -31,6 +51,23 @@ These environment variables set a default for a flag:
 | `FASTEST_SCAN_FFMPEG` | `--ffmpeg` | The `ffmpeg` program. The default is `ffmpeg`. |
 | `FASTEST_SCAN_FFPROBE` | `--ffprobe` | The `ffprobe` program. The default is `ffprobe`. |
 | `FASTEST_SCAN_BENCH_VIDEO` | none | The video that `scripts/bench.sh` converts. |
+
+## The Android app
+
+The app in `android/` scans a book with the camera of a phone, or from a recorded
+video, and saves the PDF. It uses the same library, in the flow of `--stream`.
+
+![The lower part of the screen of the app during the scan of a video, and after the scan, with 11 pages](docs/images/android-video-scan.png)
+
+The lower part of the screen, on the Android emulator: during the scan of a
+recorded video, and after it. The small picture is the last page of the scan. With
+the camera, the screen shows the picture of the camera and the outline of each
+page.
+
+The scan of a recorded video works on a phone and on the emulator. With the
+camera, the app scanned the first pages of one book on a white desk. No scan of a
+whole book with the camera is verified yet. `docs/android.md` says how to build
+the app, how to test it, and what its limits are.
 
 ## Develop
 
@@ -49,14 +86,12 @@ These environment variables set a default for a flag:
 - `scripts/all.sh` runs the two.
 - `scripts/bench.sh` converts the benchmark video and prints the quality numbers.
 
-The code has two parts:
+The code has three parts:
 
 - `src/lib/` is the library `fastscan`. It gets frames and gives page images and PDF
   bytes. It has a C interface (`include/fastscan.h`) for an Android app.
 - `src/cli/` is the program. It decodes the video with `ffmpeg` and calls the library.
-- `android/` is the Android app. It scans with the camera or from a recorded video.
-  It scans a recorded video on a phone. The camera mode was not tested with a
-  real book: read `docs/android.md`.
+- `android/` is the Android app. It calls the library through the C interface.
 
 The program has two flows. The default reads the video two times and jumps to
 the frames that it needs. `--stream` reads the video one time, in order, and
