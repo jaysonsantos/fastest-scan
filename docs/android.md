@@ -141,9 +141,26 @@ adb shell am start -a android.intent.action.VIEW -t video/mp4 \
   during the call only. It makes a copy of the frames that it keeps.
 - The session makes its native stream with the first frame: the size and the
   rotation of the frames are known only then.
+- The screen turns with the phone (`screenOrientation="fullUser"`), and the camera
+  frames turn with the screen: `CameraSource` gives the rotation of the screen to
+  the two streams of the camera. The library needs upright frames, because the
+  fold of a book must go from the top to the bottom. For an open book, hold the
+  phone on its side.
+- The activity is not made new for a turn (`configChanges`): a new activity would
+  lose the scan and its pages. `MainActivity.arrange` puts the panel with the
+  text and the buttons below the picture or at its side.
+- During a scan with the camera, the screen keeps its direction: a session has
+  one rotation for all its frames.
+- The preview and the frames for the library have the same shape, 4 x 3 parts.
+  The screen then shows all that the library sees.
 - `push` returns the status of the frame: the page corners, `steady`, and
   `captured`. The screen draws the outline of each page: white for a page that
   moves, yellow for a steady view, green when the user can turn the page.
+- The corners are in pixels of the upright frame. Two maps of CameraX bring them
+  to the screen: from the frame to the sensor
+  (`ImageInfo.getSensorToBufferTransformMatrix`, inverted), and from the sensor to
+  the preview view (`PreviewView.getSensorToViewTransform`). They are correct for
+  each rotation and each shape of the two streams.
 - After each `push`, the session gives each job that is ready to a render thread.
   A render thread has its own worker: the working memory of the library.
 - One lock guards the functions of the native stream. The render of a job runs
@@ -182,6 +199,12 @@ memory: no run with smaller settings was made on a phone.
 - The detector wants a stable view of each spread for 0.3 seconds, with the
   hands off most of the page.
 - The video must have 8 bits per sample. A video with 10 bits (HDR) is not supported.
-- The camera source asks for frames of 3840 x 2160 pixels and takes the nearest
-  size that the phone gives. With smaller frames, the pages have fewer pixels.
-- The screen is fixed to the upright position.
+- The camera source asks for frames of 2880 x 2160 pixels (4 x 3 parts, 9 MB for
+  each frame) and takes the nearest size that the phone gives. With smaller
+  frames, the pages have fewer pixels.
+- The screen does not turn while the phone is flat above the book: the phone
+  cannot know its direction then. Turn the phone while it is upright, then point
+  it down. The screen also does not turn when the user has locked the rotation
+  of the screen.
+- A change of the configuration that is not a turn makes the activity new, and
+  the scan is lost: for example a change of the language or of the dark mode.

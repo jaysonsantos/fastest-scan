@@ -1,72 +1,99 @@
 <?xml version="1.0" encoding="utf-8"?>
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- The picture of the camera, and the panel with the text and the buttons. The
+    panel is below the picture when the phone is upright, and at the side of the
+    picture when the phone is on its side: `MainActivity.arrange` changes the
+    directions of `root` and `buttons`. The panel thus never covers the picture. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@android:color/black"
-    android:fitsSystemWindows="true">
+    android:fitsSystemWindows="true"
+    android:orientation="vertical">
 
-    <androidx.camera.view.PreviewView
-        android:id="@+id/preview"
+    <FrameLayout
+        android:id="@+id/picture"
         android:layout_width="match_parent"
-        android:layout_height="match_parent" />
+        android:layout_height="0dp"
+        android:layout_weight="1">
 
-    <br.com.jayson.fastestscan.ui.PageOverlayView
-        android:id="@+id/overlay"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent" />
+        <androidx.camera.view.PreviewView
+            android:id="@+id/preview"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
 
-    <TextView
-        android:id="@+id/status"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top"
-        android:background="#80000000"
-        android:padding="12dp"
-        android:textColor="@android:color/white"
-        android:textSize="16sp" />
+        <br.com.jayson.fastestscan.ui.PageOverlayView
+            android:id="@+id/overlay"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
 
-    <ImageView
-        android:id="@+id/last_page"
-        android:layout_width="96dp"
-        android:layout_height="136dp"
-        android:layout_gravity="bottom|end"
-        android:layout_marginBottom="88dp"
-        android:layout_marginEnd="12dp"
-        android:contentDescription="@string/last_page_description"
-        android:scaleType="fitCenter" />
+        <!-- The picture is at the start of this frame. On a long screen, this
+            corner is free. -->
+        <ImageView
+            android:id="@+id/last_page"
+            android:layout_width="96dp"
+            android:layout_height="136dp"
+            android:layout_gravity="bottom|end"
+            android:layout_margin="12dp"
+            android:contentDescription="@string/last_page_description"
+            android:scaleType="fitCenter" />
+    </FrameLayout>
 
     <LinearLayout
+        android:id="@+id/panel"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_gravity="bottom"
-        android:background="#80000000"
-        android:gravity="center"
-        android:orientation="horizontal"
+        android:orientation="vertical"
         android:padding="12dp">
 
-        <Button
-            android:id="@+id/camera_button"
-            android:layout_width="0dp"
+        <!-- Two lines at least: the picture does not change its size when the text
+            changes its length. -->
+        <TextView
+            android:id="@+id/status"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:enabled="false"
-            android:text="@string/button_camera" />
+            android:minLines="2"
+            android:textColor="@android:color/white"
+            android:textSize="16sp" />
 
-        <Button
-            android:id="@+id/video_button"
+        <!-- At the side of the picture, the panel is as high as the screen: the
+            buttons stay at its lower end. -->
+        <Space
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:layout_weight="1"
-            android:text="@string/button_video" />
+            android:layout_height="0dp"
+            android:layout_weight="1" />
 
-        <Button
-            android:id="@+id/save_button"
-            android:layout_width="0dp"
+        <LinearLayout
+            android:id="@+id/buttons"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:layout_weight="1"
-            android:enabled="false"
-            android:text="@string/button_save" />
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/camera_button"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:enabled="false"
+                android:text="@string/button_camera" />
+
+            <Button
+                android:id="@+id/video_button"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="@dimen/button_gap"
+                android:layout_weight="1"
+                android:text="@string/button_video" />
+
+            <Button
+                android:id="@+id/save_button"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="@dimen/button_gap"
+                android:layout_weight="1"
+                android:enabled="false"
+                android:text="@string/button_save" />
+        </LinearLayout>
     </LinearLayout>
-</FrameLayout>
+</LinearLayout>

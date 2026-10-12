@@ -2,14 +2,21 @@ package br.com.jayson.fastestscan.ui
 
 import android.Manifest
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import android.net.Uri
 import android.os.Bundle
+import android.view.View
+import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
@@ -33,8 +40,17 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * The two sources give their frames to a [ScanSession]. The screen shows what the
  * library finds, and writes the PDF when the scan has ended.
+ *
+ * The screen turns with the phone, and the camera frames turn with the screen. The
+ * activity is not made new for a turn: it puts its views in the other direction
+ * ([arrange]). During a scan with the camera, the screen keeps its direction: a
+ * session has one rotation for all its frames.
  */
 class MainActivity : ComponentActivity() {
+    private lateinit var root: LinearLayout
+    private lateinit var picture: View
+    private lateinit var panel: View
+    private lateinit var buttons: LinearLayout
     private lateinit var previewView: PreviewView
     private lateinit var overlay: PageOverlayView
     private lateinit var statusText: TextView
@@ -60,7 +76,10 @@ class MainActivity : ComponentActivity() {
     private val statusPending = AtomicBoolean(false)
 
     @Volatile
-    private var lastStatus: Pair<FrameFormat, ScanStatus>? = null
+    private var lastStatus: Pair<Matrix?, ScanStatus>? = null
+
+    /** The map from the upright frame to the preview view. Only the main thread uses it. */
+    private val frameToView = Matrix()
 
     private enum class State { IDLE, CAMERA_SCAN, VIDEO_SCAN, FINISHING }
 
@@ -78,6 +97,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        root = findViewById(R.id.root)
+        picture = findViewById(R.id.picture)
+        panel = findViewById(R.id.panel)
+        buttons = findViewById(R.id.buttons)
         previewView = findViewById(R.id.preview)
         overlay = findViewById(R.id.overlay)
         statusText = findViewById(R.id.status)
@@ -85,8 +108,10 @@ class MainActivity : ComponentActivity() {
         cameraButton = findViewById(R.id.camera_button)
         videoButton = findViewById(R.id.video_button)
         saveButton = findViewById(R.id.save_button)
-        // The whole frame is in view, so that the outline of a page is at the place of the page.
-        previewView.scaleType = PreviewView.ScaleType.FIT_CENTER
+        // The whole frame is in view, at the start of its part of the screen: the
+        // free end of that part is next to the panel.
+        previewView.scaleType = PreviewView.ScaleType.FIT_START
+        arrange(resources.configuration.orientation)
 
         cameraButton.setOnClickListener { if (state == State.CAMERA_SCAN) stopCameraScan() else startCameraScan() }
         videoButton.setOnClickListener { if (state == State.VIDEO_SCAN) cancelled.set(true) else pickVideo.launch(VIDEO_MIME_TYPE) }
@@ -115,6 +140,12 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
+    /** The screen turned by a quarter turn: the manifest gives such a change to this activity. */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        arrange(newConfig.orientation)
+    }
+
     /** The system asks for memory: the idle workers give their large blocks back. */
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
@@ -140,7 +171,7 @@ class MainActivity : ComponentActivity() {
         val source = camera ?: return
         dropOldSession()
         showState(State.CAMERA_SCAN)
-        source.startScan(::createSession, { format, status -> postStatus(format, status) }, ::scanFailed)
+        source.startScan(::createSession, { uprightToSensor, status -> postStatus(uprightToSensor, status) }, ::scanFailed)
     }
 
     private fun stopCameraScan() {
@@ -222,19 +253,22 @@ class MainActivity : ComponentActivity() {
     // region: the screen
 
     /** Runs on the thread of the source. The main thread takes the last status only. */
-    private fun postStatus(format: FrameFormat, status: ScanStatus) {
-        lastStatus = format to status
+    private fun postStatus(uprightToSensor: Matrix?, status: ScanStatus) {
+        lastStatus = uprightToSensor to status
         if (!statusPending.compareAndSet(false, true)) return
         runOnUiThread {
             statusPending.set(false)
-            val (lastFormat, last) = lastStatus ?: return@runOnUiThread
+            val (lastUprightToSensor, last) = lastStatus ?: return@runOnUiThread
             if (state != State.CAMERA_SCAN) return@runOnUiThread
-            val sideways = lastFormat.rotationDegrees % HALF_TURN_DEGREES != 0
-            overlay.show(
-                uprightWidth = if (sideways) lastFormat.height else lastFormat.width,
-                uprightHeight = if (sideways) lastFormat.width else lastFormat.height,
-                status = last,
-            )
+            // The preview view knows where each point of the sensor is on the screen.
+            val sensorToView = previewView.sensorToViewTransform
+            if (lastUprightToSensor != null && sensorToView != null) {
+                frameToView.set(lastUprightToSensor)
+                frameToView.postConcat(sensorToView)
+                overlay.show(frameToView, last)
+            } else {
+                overlay.clear()
+            }
             val hint = when {
                 last.captured -> R.string.hint_turn
                 last.steady -> R.string.hint_hold
@@ -256,6 +290,8 @@ class MainActivity : ComponentActivity() {
 
     private fun showState(next: State) {
         state = next
+        // A session has the rotation of its first frame: no turn during a scan with the camera.
+        requestedOrientation = if (next == State.CAMERA_SCAN) ActivityInfo.SCREEN_ORIENTATION_LOCKED else ActivityInfo.SCREEN_ORIENTATION_FULL_USER
         updateButtons()
         if (next != State.IDLE) saveButton.isEnabled = false
         if (next != State.CAMERA_SCAN) overlay.clear()
@@ -263,6 +299,30 @@ class MainActivity : ComponentActivity() {
             State.IDLE -> statusText.setText(R.string.status_idle)
             State.FINISHING -> statusText.setText(R.string.status_finishing)
             else -> Unit
+        }
+    }
+
+    /**
+     * Put the panel below the picture when the screen is upright, and at the side of
+     * the picture when the screen is on its side.
+     */
+    private fun arrange(orientation: Int) {
+        val sideways = orientation == Configuration.ORIENTATION_LANDSCAPE
+        root.orientation = if (sideways) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+        picture.layoutParams = LinearLayout.LayoutParams(if (sideways) 0 else MATCH_PARENT, if (sideways) MATCH_PARENT else 0, 1f)
+        panel.layoutParams = LinearLayout.LayoutParams(
+            if (sideways) resources.getDimensionPixelSize(R.dimen.side_panel_width) else MATCH_PARENT,
+            if (sideways) MATCH_PARENT else WRAP_CONTENT,
+        )
+        buttons.orientation = if (sideways) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+        val gap = resources.getDimensionPixelSize(R.dimen.button_gap)
+        for (index in 0 until buttons.childCount) {
+            val gapBefore = if (index == 0) 0 else gap
+            buttons.getChildAt(index).layoutParams = if (sideways) {
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = gapBefore }
+            } else {
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = gapBefore }
+            }
         }
     }
 
@@ -291,7 +351,6 @@ class MainActivity : ComponentActivity() {
         const val PDF_MIME_TYPE = "application/pdf"
         const val VIDEO_MIME_TYPE = "video/*"
         const val PERCENT = 100
-        const val HALF_TURN_DEGREES = 180
 
         /** The small picture of a page has one pixel for each 4 x 4 pixels of the page. */
         const val THUMBNAIL_SAMPLE = 4

@@ -18,6 +18,7 @@
     <string name="status_finishing">The last pages are in work.</string>
     <string name="status_saved">The PDF is saved.</string>
     <string name="status_error">Error: %1$s</string>
+    <string name="error_turned">The phone turned during the scan. Start the scan again.</string>
     <plurals name="status_done">
         <item quantity="one">The scan has %d page.</item>
         <item quantity="other">The scan has %d pages.</item>

@@ -15,10 +15,16 @@
         android:label="@string/app_name"
         android:largeHeap="true"
         android:theme="@android:style/Theme.Material.NoActionBar">
+        <!-- fullUser: the screen turns with the phone, in each of the four directions,
+            when the user allows the rotation of the screen. The library needs the
+            frames upright: the fold of a book goes from the top to the bottom.
+            configChanges: the activity handles the turn itself. A new activity
+            for each turn would lose the scan and its pages. -->
         <activity
             android:name=".ui.MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize"
             android:exported="true"
-            android:screenOrientation="portrait">
+            android:screenOrientation="fullUser">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

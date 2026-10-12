@@ -2,37 +2,39 @@ package br.com.jayson.fastestscan.ui
 
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
 import android.util.AttributeSet
 import android.view.View
 import br.com.jayson.fastestscan.core.PageCorners
 import br.com.jayson.fastestscan.core.ScanStatus
-import kotlin.math.min
 
 /**
  * The outline of each page that the library finds, on top of the camera preview.
  * The colour says what the user can do: wait, or turn the page.
  *
- * The view and the preview show the upright frame in the same way: the whole
- * frame, as large as the view allows, in the middle.
+ * The view has the place and the size of the preview view: a point of the preview
+ * view is the same point of this view.
  */
 class PageOverlayView @JvmOverloads constructor(context: Context, attributes: AttributeSet? = null) : View(context, attributes) {
-    private var frameWidth = 0
-    private var frameHeight = 0
+    private val frameToView = Matrix()
     private var pages: List<PageCorners> = emptyList()
     private var color = COLOR_SEARCHING
     private val outline = Path()
+    private val point = FloatArray(2)
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = STROKE_DP * resources.displayMetrics.density
         strokeJoin = Paint.Join.ROUND
     }
 
-    /** Show the pages of a frame. The size is the size of the upright frame in pixels. */
-    fun show(uprightWidth: Int, uprightHeight: Int, status: ScanStatus) {
-        frameWidth = uprightWidth
-        frameHeight = uprightHeight
+    /**
+     * Show the pages of a frame. [frameToView] maps a point of the upright frame,
+     * which is where the corners of [status] are, to a point of this view.
+     */
+    fun show(frameToView: Matrix, status: ScanStatus) {
+        this.frameToView.set(frameToView)
         pages = status.pages
         color = when {
             status.captured -> COLOR_CAPTURED
@@ -49,17 +51,15 @@ class PageOverlayView @JvmOverloads constructor(context: Context, attributes: At
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        if (frameWidth == 0 || frameHeight == 0 || pages.isEmpty()) return
-        val scale = min(width.toFloat() / frameWidth, height.toFloat() / frameHeight)
-        val left = (width - frameWidth * scale) / 2
-        val top = (height - frameHeight * scale) / 2
+        if (pages.isEmpty()) return
         paint.color = color
         for (page in pages) {
             outline.rewind()
-            page.points.forEachIndexed { index, point ->
-                val x = left + point.x * scale
-                val y = top + point.y * scale
-                if (index == 0) outline.moveTo(x, y) else outline.lineTo(x, y)
+            page.points.forEachIndexed { index, corner ->
+                point[0] = corner.x
+                point[1] = corner.y
+                frameToView.mapPoints(point)
+                if (index == 0) outline.moveTo(point[0], point[1]) else outline.lineTo(point[0], point[1])
             }
             outline.close()
             canvas.drawPath(outline, paint)

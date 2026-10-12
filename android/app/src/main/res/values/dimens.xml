@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The width of the panel when it is at the side of the picture. On a screen
+        of 18 x 9 parts or longer, a picture of 4 x 3 parts leaves this width free. -->
+    <dimen name="side_panel_width">200dp</dimen>
+    <dimen name="button_gap">8dp</dimen>
+</resources>
