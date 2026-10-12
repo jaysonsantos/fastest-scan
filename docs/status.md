@@ -165,9 +165,10 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
    - Frame, segment, and candidate indexes are all `u32`: the compiler cannot
      find a mix-up. An `enum(u32)` for each kind can.
    - No list reserves its capacity, and `pdf.Writer` keeps its allocator.
-   - The test with `checkAllAllocationFailures` covers `fuse.fuse`,
-     `render.renderSpread`, and `render.encodePage`. The other entry points of
-     the library have no such test.
+   - The tests that make each allocation fail (`alloc_check.eachFailure`)
+     cover the entry points that the CLI calls. They found no more memory that
+     stays. `detect.zig` has no test of its own: the tests of `observe.zig` and
+     `render.zig` run it.
 
 ## Known problems
 

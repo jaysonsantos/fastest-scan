@@ -61,9 +61,11 @@ Read `docs/status.md` first. It says what works, what does not, and what is next
   not rely on an arena. The CLI gives each worker a `memory.BlockCache`, which uses
   a large block again for the next request of the same size (decision 0017).
 - Free a block also when a later step fails: put the `defer` or the `errdefer`
-  directly after the allocation. `fuse.zig` and `render.zig` have a test with
-  `std.testing.checkAllAllocationFailures`, which makes each allocation fail one
-  time. A new entry point of the library gets such a test.
+  directly after the allocation. Each entry point of the library has a test with
+  `alloc_check.eachFailure`, which makes each allocation fail one time. A new
+  entry point gets such a test. Do not use
+  `std.testing.checkAllAllocationFailures`: it needs the same number of
+  allocations in each run, and a list that grows does not give that.
 - Keep the name of an error. Do not change each error into one name, and do not
   drop an error with `catch {}`: handle the errors that have a meaning (for
   example `error.FileNotFound` for a cache), and give the others to the caller.

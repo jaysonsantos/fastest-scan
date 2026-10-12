@@ -1245,6 +1245,7 @@ const min_ring_variance = 4.0;
 // region: tests
 
 const testing = std.testing;
+const alloc_check = @import("alloc_check.zig");
 
 const test_page_width = 160;
 /// The page of the tests with a finger: a finger needs more space.
@@ -1609,9 +1610,10 @@ test "the fusion frees its memory when an allocation fails" {
     for (&pages) |*page| page.* = try testPage(testing.allocator);
     defer for (pages) |page| page.deinit(testing.allocator);
     // Each kind of work: glare on the bar of the reference, a finger on the
-    // reference only, and a finger in all frames.
+    // reference only, and a finger in all frames. The two fingers lie at
+    // opposite edges, so each one is a region of its own.
     fillGlare(pages[0], 40, 80, 60, 100);
-    fillFinger(pages[0], 16, 72, 144, 200);
+    fillFinger(pages[0], 96, 152, 0, 40);
     for (pages) |page| fillFinger(page, 96, 152, 152, 200);
 
     const Run = struct {
@@ -1625,10 +1627,12 @@ test "the fusion frees its memory when an allocation fails" {
             defer if (map) |found| found.deinit(allocator);
             const stats = try fuse(allocator, &layers, test_options, &map);
             // The run does the work of each kind, so each allocation has its turn.
-            try testing.expect(stats.glare > 0 and stats.cover > 0 and stats.painted > 0);
+            try testing.expect(stats.glare > 0);
+            try testing.expect(stats.cover > 0);
+            try testing.expect(stats.painted > 0);
         }
     };
-    try testing.checkAllAllocationFailures(testing.allocator, Run.run, .{@as([]const RgbF32, &pages)});
+    try alloc_check.eachFailure(testing.allocator, Run.run, .{@as([]const RgbF32, &pages)});
 }
 
 // endregion: tests

@@ -499,6 +499,7 @@ pub fn encodePage(allocator: Allocator, scratch: Allocator, page: image.Rgb8, op
 // region: tests
 
 const testing = std.testing;
+const alloc_check = @import("alloc_check.zig");
 
 const test_width = 320;
 const test_height = 240;
@@ -593,11 +594,11 @@ fn darkBarRow(page: image.Rgb8, x: usize) f32 {
     return if (count > 0) sum / count else -1;
 }
 
-test "a page with a curved top edge renders with the curved map" {
-    const buffer = try testing.allocator.alloc(u8, image.packedFrameSize(test_width, test_height));
-    defer testing.allocator.free(buffer);
-    // The top and the bottom edge sag by 12 pixels in the middle. A dark bar runs 18
-    // to 24 pixels below the top edge: a line of text on the curled paper.
+/// A frame with a page whose top and bottom edge sag by 12 pixels in the middle. A
+/// dark bar runs 18 to 24 pixels below the top edge: a line of text on the curled
+/// paper. `curved_test_page` has the corners of the page.
+fn curvedTestFrame(allocator: Allocator) ![]u8 {
+    const buffer = try allocator.alloc(u8, image.packedFrameSize(test_width, test_height));
     const Shape = struct {
         fn top(x: usize) f32 {
             const t = (@as(f32, @floatFromInt(x)) - 160) / 80;
@@ -627,12 +628,20 @@ test "a page with a curved top edge renders with the curved map" {
             buffer[luma_size + chroma_size + y * (test_width / 2) + x] = if (Shape.onPage(2 * x, 2 * y)) 128 else 150;
         }
     }
-    const page: Quad = .{
-        .tl = geometry.Point.init(80, 40),
-        .tr = geometry.Point.init(240, 40),
-        .br = geometry.Point.init(240, 200),
-        .bl = geometry.Point.init(80, 200),
-    };
+    return buffer;
+}
+
+const curved_test_page: Quad = .{
+    .tl = geometry.Point.init(80, 40),
+    .tr = geometry.Point.init(240, 40),
+    .br = geometry.Point.init(240, 200),
+    .bl = geometry.Point.init(80, 200),
+};
+
+test "a page with a curved top edge renders with the curved map" {
+    const buffer = try curvedTestFrame(testing.allocator);
+    defer testing.allocator.free(buffer);
+    const page = curved_test_page;
     const columns = [_]usize{ 15, 75, 135 };
 
     // With the curl correction the bar is one straight line.
@@ -748,11 +757,33 @@ test "the page render frees its memory when an allocation fails" {
             encoded.deinit(allocator);
         }
     };
-    try testing.checkAllAllocationFailures(
+    try alloc_check.eachFailure(
         testing.allocator,
         Run.run,
         .{ testSource(reference_buffer, test_page), @as([]const SourceFrame, &donors) },
     );
+}
+
+test "the signature and the curved page free their memory when an allocation fails" {
+    const flat_buffer = try testFrame(testing.allocator, test_page, null);
+    defer testing.allocator.free(flat_buffer);
+    const curved_buffer = try curvedTestFrame(testing.allocator);
+    defer testing.allocator.free(curved_buffer);
+
+    const Check = struct {
+        fn signature(allocator: Allocator, reference: SourceFrame) !void {
+            const result = try renderSignature(allocator, allocator, reference, .single, test_size, .{});
+            defer result.deinit(allocator);
+            try testing.expectEqual(@as(u8, 1), result.page_count);
+        }
+        fn curved(allocator: Allocator, reference: SourceFrame) !void {
+            const spread = try renderSpread(allocator, allocator, reference, &.{}, .single, null, test_size, .{ .curl = true });
+            defer spread.deinit(allocator);
+            try testing.expect(spread.pages[0].curled);
+        }
+    };
+    try alloc_check.eachFailure(testing.allocator, Check.signature, .{testSource(flat_buffer, test_page)});
+    try alloc_check.eachFailure(testing.allocator, Check.curved, .{testSource(curved_buffer, curved_test_page)});
 }
 
 // endregion: tests

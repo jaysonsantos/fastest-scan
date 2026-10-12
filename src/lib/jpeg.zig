@@ -889,6 +889,7 @@ pub fn encodeRgb(allocator: Allocator, scratch: Allocator, rgb: image.Rgb8, opti
 // region: tests
 
 const testing = std.testing;
+const alloc_check = @import("alloc_check.zig");
 
 /// The DCT by its definition, for the comparison with the fast transform.
 fn referenceDct(input: *const [block_len]f32, output: *[block_len]f32) void {
@@ -1002,6 +1003,31 @@ test "encoded files start and end with the JPEG markers" {
 test "zero-sized images are an error" {
     const empty: image.PlaneView = .{ .data = &.{}, .width = 0, .height = 4, .stride = 0 };
     try testing.expectError(error.UnsupportedDimensions, encodeGray(testing.allocator, testing.allocator, empty, .{}));
+}
+
+test "the encoders free their memory when an allocation fails" {
+    const width = 19;
+    const height = 13;
+    var rgb = try image.Rgb8.init(testing.allocator, width, height);
+    defer rgb.deinit(testing.allocator);
+    for (rgb.data, 0..) |*value, i| value.* = @intCast((i * 7) % 256);
+    var gray = try image.Plane.init(testing.allocator, width, height);
+    defer gray.deinit(testing.allocator);
+    for (gray.data, 0..) |*value, i| value.* = @intCast((i * 5) % 256);
+
+    const Check = struct {
+        fn color(allocator: Allocator, picture: image.Rgb8, subsampling: Subsampling) !void {
+            const bytes = try encodeRgb(allocator, allocator, picture, .{ .subsampling = subsampling });
+            allocator.free(bytes);
+        }
+        fn grey(allocator: Allocator, picture: image.PlaneView) !void {
+            const bytes = try encodeGray(allocator, allocator, picture, .{});
+            allocator.free(bytes);
+        }
+    };
+    try alloc_check.eachFailure(testing.allocator, Check.color, .{ rgb, Subsampling.s444 });
+    try alloc_check.eachFailure(testing.allocator, Check.color, .{ rgb, Subsampling.s420 });
+    try alloc_check.eachFailure(testing.allocator, Check.grey, .{gray.view()});
 }
 
 // endregion: tests

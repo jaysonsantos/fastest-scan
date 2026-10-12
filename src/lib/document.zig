@@ -98,6 +98,7 @@ fn percentile(values: []f32, fraction: f32) f32 {
 // region: tests
 
 const testing = std.testing;
+const alloc_check = @import("alloc_check.zig");
 
 fn testFrame(width: f32, height: f32) observe.FrameObservation {
     var frame: observe.FrameObservation = .{
@@ -140,6 +141,29 @@ test "the page size is the median shape at the scale of the full frames" {
 
 test "no spreads give no page size" {
     try testing.expect(try pageGeometry(testing.allocator, &.{}, &.{}, .{ .width = 960, .height = 540 }, 4, .{}) == null);
+}
+
+test "the page size frees its memory when an allocation fails" {
+    const observations = [_]observe.FrameObservation{
+        testFrame(200, 300),
+        testFrame(210, 300),
+        testFrame(100, 300),
+    };
+    var segments: [3]timeline.Segment = undefined;
+    for (&segments, 0..) |*segment, index| {
+        segment.* = .{ .kind = .single, .first_frame = @intCast(index), .last_frame = @intCast(index), .reference = @intCast(index), .stable_frames = 1, .score = 0, .weak = false };
+    }
+    const Check = struct {
+        fn run(allocator: Allocator, frames: []const observe.FrameObservation, spreads: []const timeline.Segment) !void {
+            const result = try pageGeometry(allocator, frames, spreads, .{ .width = 960, .height = 540 }, 4, .{});
+            try testing.expect(result != null);
+        }
+    };
+    try alloc_check.eachFailure(
+        testing.allocator,
+        Check.run,
+        .{ @as([]const observe.FrameObservation, &observations), @as([]const timeline.Segment, &segments) },
+    );
 }
 
 // endregion: tests

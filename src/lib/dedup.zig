@@ -203,6 +203,7 @@ const min_comparable_tiles = 12;
 // region: tests
 
 const testing = std.testing;
+const alloc_check = @import("alloc_check.zig");
 
 /// A page of random blobs. The same seed gives the same page.
 fn testSignature(allocator: Allocator, seed: u64, shift: u32) !image.Plane {
@@ -290,6 +291,34 @@ test "a weak early view is replaced by the good view some spreads later" {
     defer resolution.deinit(testing.allocator);
     try testing.expectEqualSlices(u32, &.{ 1, 2, 3 }, resolution.kept);
     try testing.expectEqualSlices(u32, &.{ 3, 1, 2, 3 }, resolution.owner);
+}
+
+test "the duplicate search frees its memory when an allocation fails" {
+    var planes: [6]image.Plane = undefined;
+    // Spread A, spread A again with a small shift, then spread B.
+    planes[0] = try testSignature(testing.allocator, 1, 0);
+    planes[1] = try testSignature(testing.allocator, 2, 0);
+    planes[2] = try testSignature(testing.allocator, 1, 3);
+    planes[3] = try testSignature(testing.allocator, 2, 3);
+    planes[4] = try testSignature(testing.allocator, 3, 0);
+    planes[5] = try testSignature(testing.allocator, 4, 0);
+    defer for (planes) |plane| plane.deinit(testing.allocator);
+    const candidates = [_]Candidate{
+        .{ .kind = .spread, .signatures = .{ planes[0].view(), planes[1].view() }, .quality = 0.4, .weak = false },
+        .{ .kind = .spread, .signatures = .{ planes[2].view(), planes[3].view() }, .quality = 0.7, .weak = false },
+        .{ .kind = .spread, .signatures = .{ planes[4].view(), planes[5].view() }, .quality = 0.5, .weak = false },
+    };
+
+    const Check = struct {
+        fn run(allocator: Allocator, spreads: []const Candidate) !void {
+            var log: std.ArrayList(Comparison) = .empty;
+            defer log.deinit(allocator);
+            const resolution = try resolve(allocator, spreads, .{}, &log);
+            defer resolution.deinit(allocator);
+            try testing.expectEqual(@as(usize, 2), resolution.kept.len);
+        }
+    };
+    try alloc_check.eachFailure(testing.allocator, Check.run, .{@as([]const Candidate, &candidates)});
 }
 
 // endregion: tests

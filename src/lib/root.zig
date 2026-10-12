@@ -31,4 +31,6 @@ pub const version: []const u8 = build_options.version;
 
 test {
     std.testing.refAllDecls(@This());
+    // A helper for the tests of the other files, with tests of its own.
+    _ = @import("alloc_check.zig");
 }

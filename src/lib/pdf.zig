@@ -228,6 +228,7 @@ pub const Writer = struct {
 // region: tests
 
 const testing = std.testing;
+const alloc_check = @import("alloc_check.zig");
 
 const MemoryOutput = struct {
     bytes: std.ArrayList(u8) = .empty,
@@ -277,6 +278,23 @@ test "a document with two pages has a correct cross-reference table" {
     const number_end = std.mem.findScalarPos(u8, bytes, number_start, '\n').?;
     const xref_position = try std.fmt.parseInt(usize, bytes[number_start..number_end], 10);
     try testing.expect(std.mem.startsWith(u8, bytes[xref_position..], "xref\n"));
+}
+
+test "the writer frees its memory when an allocation fails" {
+    const Check = struct {
+        fn run(allocator: Allocator) !void {
+            // The output takes its memory from the test allocator, which does not fail.
+            var memory: MemoryOutput = .{};
+            defer memory.bytes.deinit(testing.allocator);
+            var writer = try Writer.init(allocator, memory.output(), .{ .title = "A title" });
+            defer writer.deinit();
+            const fake_jpeg = "\xFF\xD8 not a real image \xFF\xD9";
+            try writer.addPage(.{ .jpeg = fake_jpeg, .width_px = 1200, .height_px = 1800, .color_space = .rgb, .dpi = 300 });
+            try writer.addPage(.{ .jpeg = fake_jpeg, .width_px = 600, .height_px = 900, .color_space = .gray, .dpi = 150 });
+            try writer.finish();
+        }
+    };
+    try alloc_check.eachFailure(testing.allocator, Check.run, .{});
 }
 
 // endregion: tests

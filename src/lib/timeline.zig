@@ -773,6 +773,7 @@ fn shapeError(page: *const observe.PageObservation, page_aspect: ?f32) f32 {
 // region: tests
 
 const testing = std.testing;
+const alloc_check = @import("alloc_check.zig");
 
 /// An observation of a page with a random thumbnail. The same seed gives the same page.
 fn testObservation(seed: u64, kind: detect.LayoutKind, shift: f32, support: f32) FrameObservation {
@@ -980,6 +981,56 @@ test "the reference of a page is a frame without glare on that page" {
     for (observations[24..]) |*observation| observation.pages[0].clipped_edges = .{ .left = true };
     const cut = try chooseReference(testing.allocator, &observations, &spans, 15, 0, .{});
     try testing.expectEqual(@as(u32, 15), cut.frame);
+}
+
+test "the timeline frees its memory when an allocation fails" {
+    var observations: [90]FrameObservation = undefined;
+    for (0..30) |index| observations[index] = testObservation(1, .spread, 0, 0.5);
+    for (30..40) |index| observations[index] = FrameObservation.none;
+    for (40..50) |index| observations[index] = testObservation(100 + index, .spread, @floatFromInt(index * 20), 0.05);
+    for (50..90) |index| observations[index] = testObservation(2, .spread, 0, 0.5);
+
+    const Check = struct {
+        fn run(allocator: Allocator, frames: []const FrameObservation) !void {
+            const timeline = try build(allocator, frames, test_options);
+            defer timeline.deinit(allocator);
+            try testing.expectEqual(@as(usize, 2), timeline.segments.len);
+        }
+    };
+    try alloc_check.eachFailure(testing.allocator, Check.run, .{@as([]const FrameObservation, &observations)});
+}
+
+test "the donor choice and the reference choice free their memory when an allocation fails" {
+    var observations: [30]FrameObservation = undefined;
+    // The camera drifts, so frames are donors for their position too.
+    for (&observations, 0..) |*observation, index| {
+        observation.* = testObservation(1, .spread, @as(f32, @floatFromInt(index)) * 1.5, 0.5);
+    }
+    // Text on the left page. Glare washes it out in most frames, also in frame 15.
+    const text_from = 20 * observe.ink_grid_width + 10;
+    for (&observations, 0..) |*observation, index| {
+        const clean = index == 4 or index == 22;
+        for (0..12) |offset| observation.pages[0].ink[text_from + offset] = if (clean) 70 else 180;
+    }
+    // Two frames cut the left page: they come in the last step of the choice.
+    for ([_]usize{ 8, 26 }) |index| observations[index].pages[0].clipped_edges = .{ .left = true };
+    const spans = [_]FrameSpan{.{ .first = 0, .last = 29 }};
+
+    const Check = struct {
+        fn donors(allocator: Allocator, frames: []const FrameObservation, ranges: []const FrameSpan) !void {
+            const chosen = try selectDonors(allocator, frames, ranges, 15, null, .{ .count = 4, .page_aspect = 200.0 / 300.0 });
+            defer allocator.free(chosen);
+            try testing.expect(chosen.len >= 2);
+        }
+        fn reference(allocator: Allocator, frames: []const FrameObservation, ranges: []const FrameSpan) !void {
+            const chosen = try chooseReference(allocator, frames, ranges, 15, 0, .{});
+            try testing.expect(chosen.frame < frames.len);
+        }
+    };
+    const frames: []const FrameObservation = &observations;
+    const ranges: []const FrameSpan = &spans;
+    try alloc_check.eachFailure(testing.allocator, Check.donors, .{ frames, ranges });
+    try alloc_check.eachFailure(testing.allocator, Check.reference, .{ frames, ranges });
 }
 
 // endregion: tests

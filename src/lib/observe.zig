@@ -427,6 +427,7 @@ const flat_variance = 4.0;
 // region: tests
 
 const testing = std.testing;
+const alloc_check = @import("alloc_check.zig");
 
 test "covered cells connect to the border" {
     var paper = CellSet.full;
@@ -496,6 +497,32 @@ test "page similarity needs common free cells" {
     var b = testPage(1);
     b.covered = CellSet.full;
     try testing.expect(pageSimilarity(&a, &b) == null);
+}
+
+test "the observation of a frame frees its memory when an allocation fails" {
+    // A bright page with a dark bar and some dots, on a darker desk.
+    const width = 320;
+    const height = 240;
+    const buffer = try testing.allocator.alloc(u8, image.packedFrameSize(width, height));
+    defer testing.allocator.free(buffer);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const on_page = x >= 80 and x < 230 and y >= 30 and y < 210;
+            const on_bar = x >= 110 and x < 200 and y >= 100 and y < 125;
+            const dot = (x / 4 * 7 + y / 4 * 13) % 11 == 0;
+            buffer[y * width + x] = if (!on_page) 70 else if (on_bar) 40 else if (dot) 120 else 200;
+        }
+    }
+    // No colour.
+    @memset(buffer[width * height ..], 128);
+
+    const Check = struct {
+        fn run(allocator: Allocator, frame: image.FrameView) !void {
+            const observation = try observeFrame(allocator, frame, .{});
+            try testing.expect(observation.detected);
+        }
+    };
+    try alloc_check.eachFailure(testing.allocator, Check.run, .{image.FrameView.fromPacked(buffer, width, height, .{})});
 }
 
 // endregion: tests
