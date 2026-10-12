@@ -88,7 +88,7 @@ const score_weight = struct {
 };
 
 /// How good a frame is as the single picture of its spread. Higher is better.
-fn referenceScore(observations: []const FrameObservation, index: usize) f32 {
+pub fn referenceScore(observations: []const FrameObservation, index: usize) f32 {
     const frame = &observations[index];
     var score = frame.edge_support - score_weight.cover * frame.coveredFraction();
     score -= score_weight.clipped_edge * @as(f32, @floatFromInt(frame.clippedEdgeCount()));
@@ -134,75 +134,178 @@ const Run = struct {
     kind: detect.LayoutKind,
 };
 
+/// The observations of the frames of a video from the frame `base` on. A program
+/// that gets the frames of a long video one by one keeps only the last part of the
+/// list: `items[0]` is then the observation of the frame `base`.
+///
+/// A frame at the start of `items` has no frame before it for the motion measure.
+/// So a caller that drops old observations keeps one frame more than it needs.
+pub const Window = struct {
+    items: []const FrameObservation,
+    base: usize = 0,
+
+    fn at(self: Window, index: usize) *const FrameObservation {
+        return &self.items[index - self.base];
+    }
+};
+
 /// Find the spreads in the observations of all frames, in the order of the video.
 pub fn build(allocator: Allocator, observations: []const FrameObservation, options: Options) Allocator.Error!Timeline {
-    const rate_factor = Options.reference_frame_rate / @max(options.frames_per_second, 1);
-    const max_motion = options.max_motion * rate_factor;
-    const max_gap: usize = @intFromFloat(@round(options.max_gap_seconds * options.frames_per_second));
-    const min_run: usize = @intFromFloat(@max(2, @round(options.min_run_seconds * options.frames_per_second)));
-    const weak_run: usize = @intFromFloat(@round(options.weak_run_seconds * options.frames_per_second));
+    var segments: std.ArrayList(Segment) = .empty;
+    errdefer segments.deinit(allocator);
+    var tracker: Tracker = .init(options);
+    const window: Window = .{ .items = observations };
+    for (0..observations.len) |index| {
+        const step = tracker.push(window, index);
+        if (step.final) |segment| try segments.append(allocator, segment);
+    }
+    for (tracker.finish(window).final) |final| {
+        if (final) |segment| try segments.append(allocator, segment);
+    }
+    return .{ .segments = try segments.toOwnedSlice(allocator) };
+}
 
-    var runs: std.ArrayList(Run) = .empty;
-    defer runs.deinit(allocator);
+/// The timeline of a video whose frames come one by one: a live camera, or a
+/// decoder that runs one time through the file. `build` is the same code for a
+/// list of all frames.
+///
+/// A spread is final only when the next spread is known: a run of stable frames
+/// after a short break can show the same spread again, and then it joins the
+/// spread before it.
+pub const Tracker = struct {
+    options: Options,
+    /// The run of stable frames that the last frame belongs to.
+    current: ?Run = null,
+    /// The number of frames after the last stable frame of `current`.
+    gap: usize = 0,
+    /// The last spread. It can still change.
+    pending: ?Segment = null,
 
-    // A frame is stable when it looks like the frame before it and the pages did not move.
-    var current: ?Run = null;
-    var gap: usize = 0;
-    for (observations, 0..) |*frame, index| {
+    /// What became of a run of stable frames at its end.
+    pub const Fate = enum {
+        /// The run is too short, or its best frame is covered or has weak edges.
+        rejected,
+        /// The run shows the spread of `pending` again and is a part of it now.
+        merged,
+        /// The run is a new spread: it is `pending` now.
+        accepted,
+    };
+
+    pub const Closed = struct {
+        /// The first and the last stable frame of the run.
+        frames: FrameSpan,
+        fate: Fate,
+    };
+
+    /// What one frame changed.
+    pub const Step = struct {
+        /// The run that ended at this frame.
+        closed: ?Closed = null,
+        /// The spread that can change no more.
+        final: ?Segment = null,
+        /// True when a run started: the frame before this one is its first frame.
+        opened: bool = false,
+    };
+
+    pub fn init(options: Options) Tracker {
+        return .{ .options = options };
+    }
+
+    /// Take the frame `index`. The window holds the observations up to this frame.
+    /// The frames come in order, with no index left out.
+    pub fn push(self: *Tracker, window: Window, index: usize) Step {
+        const options = self.options;
+        const rate_factor = Options.reference_frame_rate / @max(options.frames_per_second, 1);
+        const max_motion = options.max_motion * rate_factor;
+        const max_gap: usize = @intFromFloat(@round(options.max_gap_seconds * options.frames_per_second));
+
+        // A frame is stable when it looks like the frame before it and the pages did not move.
+        const frame = window.at(index);
         var stable = false;
-        if (index > 0 and frame.detected) {
-            const previous = &observations[index - 1];
+        if (index > window.base and frame.detected) {
+            const previous = window.at(index - 1);
             const similarity = observe.frameSimilarity(previous, frame);
             const motion = observe.frameMotion(previous, frame);
             if (similarity != null and motion != null) {
                 stable = similarity.? >= options.min_similarity and motion.? <= max_motion;
             }
         }
+        var step: Step = .{};
         if (stable) {
-            if (current) |*run| {
+            if (self.current) |*run| {
                 if (run.kind == frame.kind) {
                     run.last = index;
                     run.stable += 1;
-                    gap = 0;
-                    continue;
+                    self.gap = 0;
+                    return step;
                 }
-                try runs.append(allocator, run.*);
+                self.close(window, run.*, &step);
             }
-            current = .{ .first = index - 1, .last = index, .stable = 2, .kind = frame.kind };
-            gap = 0;
-        } else if (current) |run| {
-            gap += 1;
-            if (gap > max_gap) {
-                try runs.append(allocator, run);
-                current = null;
-                gap = 0;
+            self.current = .{ .first = index - 1, .last = index, .stable = 2, .kind = frame.kind };
+            self.gap = 0;
+            step.opened = true;
+        } else if (self.current) |run| {
+            self.gap += 1;
+            if (self.gap > max_gap) {
+                self.close(window, run, &step);
+                self.current = null;
+                self.gap = 0;
             }
         }
+        return step;
     }
-    if (current) |run| try runs.append(allocator, run);
 
-    var segments: std.ArrayList(Segment) = .empty;
-    errdefer segments.deinit(allocator);
-    for (runs.items) |run| {
-        if (run.stable < min_run) continue;
-        const reference = bestFrame(observations, run) orelse continue;
+    /// What the end of the video changed.
+    pub const End = struct {
+        /// The run that was open at the last frame.
+        closed: ?Closed = null,
+        /// The spreads that are final now, in the order of the video.
+        final: [2]?Segment = @splat(null),
+    };
+
+    /// The video has no more frames.
+    pub fn finish(self: *Tracker, window: Window) End {
+        var step: Step = .{};
+        if (self.current) |run| self.close(window, run, &step);
+        self.current = null;
+        self.gap = 0;
+        const last = self.pending;
+        self.pending = null;
+        return .{ .closed = step.closed, .final = .{ step.final, last } };
+    }
+
+    /// The smallest number of stable frames of a spread.
+    pub fn minRunFrames(self: *const Tracker) usize {
+        return @intFromFloat(@max(2, @round(self.options.min_run_seconds * self.options.frames_per_second)));
+    }
+
+    /// Decide what a run that ended is: no spread, the spread of `pending` again,
+    /// or a new spread.
+    fn close(self: *Tracker, window: Window, run: Run, step: *Step) void {
+        const options = self.options;
+        const weak_run: usize = @intFromFloat(@round(options.weak_run_seconds * options.frames_per_second));
+        const observations = window.items;
+        step.closed = .{ .frames = .{ .first = @intCast(run.first), .last = @intCast(run.last) }, .fate = .rejected };
+
+        if (run.stable < self.minRunFrames()) return;
+        const in_window: Run = .{ .first = run.first - window.base, .last = run.last - window.base, .stable = run.stable, .kind = run.kind };
+        const reference = bestFrame(observations, in_window) orelse return;
         const best = &observations[reference];
-        if (best.coveredFraction() > options.max_reference_cover) continue;
-        if (best.edge_support < options.min_reference_support) continue;
+        if (best.coveredFraction() > options.max_reference_cover) return;
+        if (best.edge_support < options.min_reference_support) return;
 
         const segment: Segment = .{
             .kind = run.kind,
             .first_frame = @intCast(run.first),
             .last_frame = @intCast(run.last),
-            .reference = @intCast(reference),
+            .reference = @intCast(reference + window.base),
             .stable_frames = @intCast(run.stable),
             .score = referenceScore(observations, reference),
             .weak = run.stable < weak_run or best.coveredFraction() > options.weak_cover,
         };
         // The same spread after a short break: join it with the run before.
-        if (segments.items.len > 0) {
-            const previous = &segments.items[segments.items.len - 1];
-            const similarity = observe.frameSimilarity(&observations[previous.reference], best);
+        if (self.pending) |*previous| {
+            const similarity = observe.frameSimilarity(window.at(previous.reference), best);
             if (previous.kind == segment.kind and similarity != null and similarity.? >= options.merge_similarity) {
                 previous.last_frame = segment.last_frame;
                 previous.stable_frames += segment.stable_frames;
@@ -211,14 +314,16 @@ pub fn build(allocator: Allocator, observations: []const FrameObservation, optio
                     previous.score = segment.score;
                 }
                 previous.weak = previous.stable_frames < weak_run or
-                    observations[previous.reference].coveredFraction() > options.weak_cover;
-                continue;
+                    window.at(previous.reference).coveredFraction() > options.weak_cover;
+                step.closed.?.fate = .merged;
+                return;
             }
         }
-        try segments.append(allocator, segment);
+        step.final = self.pending;
+        self.pending = segment;
+        step.closed.?.fate = .accepted;
     }
-    return .{ .segments = try segments.toOwnedSlice(allocator) };
-}
+};
 
 /// The frame of a run with the best reference score.
 fn bestFrame(observations: []const FrameObservation, run: Run) ?usize {
@@ -273,6 +378,9 @@ pub const DonorOptions = struct {
     /// come last and take no place of a frame that shows the whole page: their
     /// start position is less exact, so more of them fail the registration.
     cut_count: u8 = 3,
+    /// When given, only these frames can be donors: the frames whose pictures the
+    /// caller still holds. A program that sees each frame one time keeps only a few.
+    allowed: ?[]const u32 = null,
 };
 
 const InkSet = std.bit_set.Static(detect.max_pages * observe.ink_cells);
@@ -402,6 +510,15 @@ fn repairCells(
     return cells;
 }
 
+/// True when `allowed` is null or has the frame.
+fn isAllowed(allowed: ?[]const u32, frame: usize) bool {
+    const list = allowed orelse return true;
+    for (list) |item| {
+        if (item == frame) return true;
+    }
+    return false;
+}
+
 /// Sort a list of frame indexes and drop the indexes that come more than one time.
 fn sortUnique(frames: *std.ArrayList(u32)) void {
     std.mem.sort(u32, frames.items, {}, std.sort.asc(u32));
@@ -445,6 +562,7 @@ pub fn selectDonors(
         var index: usize = span.first;
         while (index <= span.last and index < observations.len) : (index += 1) {
             if (index == reference) continue;
+            if (!isAllowed(options.allowed, index)) continue;
             const frame = &observations[index];
             if (!frame.detected or frame.kind != reference_frame.kind) continue;
             if (pages.coveredFraction(frame) > options.max_cover) continue;
@@ -618,6 +736,10 @@ pub const ReferenceOptions = struct {
     /// How much a wrong shape lowers the score: the factor for the difference of
     /// the logarithms of the two aspects.
     shape_weight: f32 = 2.0,
+    /// When given, the result is one of these frames or the fallback: the frames
+    /// whose pictures the caller still holds. The dark level of each cell still
+    /// comes from all the frames of the spans.
+    allowed: ?[]const u32 = null,
 };
 
 pub const Reference = struct {
@@ -732,6 +854,7 @@ pub fn chooseReference(
     var first_choice = best;
     var ink: [observe.ink_cells]f32 = undefined;
     for (candidates.items) |candidate| {
+        if (candidate != fallback and !isAllowed(options.allowed, candidate)) continue;
         visibleInk(&observations[candidate].pages[page_index], &ink);
         // The ink that the frame shows and the ink that is there, over the ink
         // cells that the frame shows.
@@ -1031,6 +1154,85 @@ test "the donor choice and the reference choice free their memory when an alloca
     const ranges: []const FrameSpan = &spans;
     try alloc_check.eachFailure(testing.allocator, Check.donors, .{ frames, ranges });
     try alloc_check.eachFailure(testing.allocator, Check.reference, .{ frames, ranges });
+}
+
+test "the tracker gives the spreads of `build`, each one after the next spread is known" {
+    var observations: [150]FrameObservation = undefined;
+    for (0..30) |index| observations[index] = testObservation(1, .spread, 0, 0.5);
+    for (30..40) |index| observations[index] = FrameObservation.none;
+    // The second spread, with a break of half a second in the middle.
+    for (40..70) |index| observations[index] = testObservation(2, .spread, 0, 0.5);
+    for (70..85) |index| observations[index] = FrameObservation.none;
+    for (85..110) |index| observations[index] = testObservation(2, .spread, 4, 0.6);
+    for (110..120) |index| observations[index] = FrameObservation.none;
+    for (120..150) |index| observations[index] = testObservation(3, .single, 0, 0.5);
+
+    const timeline = try build(testing.allocator, &observations, test_options);
+    defer timeline.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 3), timeline.segments.len);
+    try testing.expectEqual(@as(u32, 109), timeline.segments[1].last_frame);
+
+    // The same frames one by one, with a window that drops the frames of a spread
+    // that is final. One frame before the oldest run stays, for the motion measure.
+    var tracker: Tracker = .init(test_options);
+    var found: [4]Segment = undefined;
+    var found_count: usize = 0;
+    var fates: [4]Tracker.Fate = undefined;
+    var fate_count: usize = 0;
+    var base: usize = 0;
+    for (0..observations.len) |index| {
+        const window: Window = .{ .items = observations[base .. index + 1], .base = base };
+        const step = tracker.push(window, index);
+        if (step.closed) |closed| {
+            fates[fate_count] = closed.fate;
+            fate_count += 1;
+        }
+        if (step.final) |segment| {
+            found[found_count] = segment;
+            found_count += 1;
+            // The first spread is final when the run after it is accepted, not earlier.
+            try testing.expect(index > tracker.pending.?.last_frame);
+            base = tracker.pending.?.first_frame - 1;
+        }
+    }
+    const end = tracker.finish(.{ .items = observations[base..], .base = base });
+    fates[fate_count] = end.closed.?.fate;
+    fate_count += 1;
+    for (end.final) |final| {
+        if (final) |segment| {
+            found[found_count] = segment;
+            found_count += 1;
+        }
+    }
+    try testing.expectEqualSlices(Segment, timeline.segments, found[0..found_count]);
+    try testing.expectEqualSlices(Tracker.Fate, &.{ .accepted, .accepted, .merged, .accepted }, fates[0..fate_count]);
+}
+
+test "only the frames that the caller still holds are a reference or a donor" {
+    var observations: [30]FrameObservation = undefined;
+    for (&observations) |*observation| observation.* = testObservation(1, .spread, 0, 0.5);
+    const Text = struct {
+        fn fill(observation: *FrameObservation, value: u8) void {
+            for (20..26) |row| {
+                for (10..50) |column| observation.pages[0].ink[row * observe.ink_grid_width + column] = value;
+            }
+        }
+    };
+    // Glare washes the text out in the first 24 frames. The timeline chose frame 15.
+    for (&observations, 0..) |*observation, index| Text.fill(observation, if (index < 24) 180 else 70);
+    const spans = [_]FrameSpan{.{ .first = 0, .last = 29 }};
+
+    // Of the frames without glare, the caller holds only frame 27.
+    const held = [_]u32{ 3, 15, 27 };
+    const reference = try chooseReference(testing.allocator, &observations, &spans, 15, 0, .{ .allowed = &held });
+    try testing.expectEqual(@as(u32, 27), reference.frame);
+    // With no such frame in hand, the first choice stays.
+    const none = try chooseReference(testing.allocator, &observations, &spans, 15, 0, .{ .allowed = &.{ 3, 15 } });
+    try testing.expectEqual(@as(u32, 15), none.frame);
+
+    const donors = try selectDonors(testing.allocator, &observations, &spans, 15, null, .{ .count = 3, .allowed = &held });
+    defer testing.allocator.free(donors);
+    try testing.expectEqualSlices(u32, &.{27}, donors);
 }
 
 // endregion: tests

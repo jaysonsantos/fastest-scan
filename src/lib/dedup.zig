@@ -76,27 +76,94 @@ pub fn resolve(
     options: Options,
     log: ?*std.ArrayList(Comparison),
 ) Allocator.Error!Resolution {
-    var kept: std.ArrayList(u32) = .empty;
-    errdefer kept.deinit(allocator);
+    var resolver: Resolver = .init(options);
+    defer resolver.deinit(allocator);
     const owner = try allocator.alloc(u32, candidates.len);
     errdefer allocator.free(owner);
-    for (owner, 0..) |*value, index| value.* = @intCast(index);
 
-    for (candidates, 0..) |*candidate, index| {
+    for (candidates, 0..) |candidate, index| {
+        const id: u32 = @intCast(index);
+        switch (try resolver.add(allocator, id, candidate, log)) {
+            .kept => owner[index] = id,
+            .duplicate => |earlier| owner[index] = earlier,
+            .replaces => |earlier| {
+                // All copies of the spread now belong to the better copy.
+                for (owner[0..index]) |*value| {
+                    if (value.* == earlier) value.* = id;
+                }
+                owner[index] = id;
+            },
+        }
+    }
+    const kept = try allocator.alloc(u32, resolver.kept.items.len);
+    for (kept, resolver.kept.items) |*id, entry| id.* = entry.id;
+    return .{ .kept = kept, .owner = owner };
+}
+
+/// The duplicate search for spreads that come one by one. `resolve` is the same
+/// code for a list of all spreads.
+pub const Resolver = struct {
+    options: Options,
+    /// The spreads to keep, in the order of the pages of the document.
+    kept: std.ArrayList(Entry) = .empty,
+
+    pub const Entry = struct {
+        id: u32,
+        candidate: Candidate,
+    };
+
+    /// What a new spread is.
+    pub const Decision = union(enum) {
+        /// A spread that the document does not have yet.
+        kept,
+        /// A copy of the kept spread with this id. The kept spread is the better copy.
+        duplicate: u32,
+        /// A better copy of the kept spread with this id. The new spread takes its
+        /// own place in the order, and the spread with this id leaves the document.
+        replaces: u32,
+    };
+
+    pub fn init(options: Options) Resolver {
+        return .{ .options = options };
+    }
+
+    pub fn deinit(self: *Resolver, allocator: Allocator) void {
+        self.kept.deinit(allocator);
+    }
+
+    /// True when a later call of `add` can still read the signatures of the kept
+    /// spread `id`. The caller can free the signatures of each other spread.
+    pub fn compares(self: *const Resolver, id: u32) bool {
+        const first = self.kept.items.len -| self.options.lookback;
+        for (self.kept.items[first..]) |entry| {
+            if (entry.id == id) return true;
+        }
+        return false;
+    }
+
+    /// Take the next spread of the video. The signatures of the candidate stay with
+    /// the caller: they must live while `compares` is true for `id`.
+    pub fn add(
+        self: *Resolver,
+        allocator: Allocator,
+        id: u32,
+        candidate: Candidate,
+        log: ?*std.ArrayList(Comparison),
+    ) Allocator.Error!Decision {
+        const kept = &self.kept;
         var duplicate_position: ?usize = null;
         var back: usize = 1;
-        while (back <= options.lookback and back <= kept.items.len) : (back += 1) {
+        while (back <= self.options.lookback and back <= kept.items.len) : (back += 1) {
             const position = kept.items.len - back;
-            const earlier_index = kept.items[position];
-            const earlier = &candidates[earlier_index];
-            if (back > 1 and !candidate.weak and !earlier.weak) continue;
+            const earlier = &kept.items[position];
+            if (back > 1 and !candidate.weak and !earlier.candidate.weak) continue;
             var comparison: Comparison = .{
-                .first = earlier_index,
-                .second = @intCast(index),
+                .first = earlier.id,
+                .second = id,
                 .same = false,
                 .matched = @splat(-1),
             };
-            comparison.same = try sameSpread(allocator, earlier, candidate, options, &comparison.matched);
+            comparison.same = try sameSpread(allocator, &earlier.candidate, &candidate, self.options, &comparison.matched);
             if (log) |list| try list.append(allocator, comparison);
             if (comparison.same) {
                 duplicate_position = position;
@@ -104,24 +171,17 @@ pub fn resolve(
             }
         }
         if (duplicate_position) |position| {
-            const earlier_index = kept.items[position];
-            if (isBetter(candidate, &candidates[earlier_index])) {
-                // The better copy takes its own place in the order, and all copies
-                // of the spread now belong to it.
-                _ = kept.orderedRemove(position);
-                try kept.append(allocator, @intCast(index));
-                for (owner[0..index]) |*value| {
-                    if (value.* == earlier_index) value.* = @intCast(index);
-                }
-            } else {
-                owner[index] = earlier_index;
-            }
-            continue;
+            const earlier = kept.items[position];
+            if (!isBetter(&candidate, &earlier.candidate)) return .{ .duplicate = earlier.id };
+            // The append comes first: when it fails, the list has no change.
+            try kept.append(allocator, .{ .id = id, .candidate = candidate });
+            _ = kept.orderedRemove(position);
+            return .{ .replaces = earlier.id };
         }
-        try kept.append(allocator, @intCast(index));
+        try kept.append(allocator, .{ .id = id, .candidate = candidate });
+        return .kept;
     }
-    return .{ .kept = try kept.toOwnedSlice(allocator), .owner = owner };
-}
+};
 
 /// A spread with two pages has more of the document than one page of it.
 fn isBetter(a: *const Candidate, b: *const Candidate) bool {
