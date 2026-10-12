@@ -168,9 +168,9 @@ pub const Scene = struct {
     /// image. It is above 1 when the region comes from a smaller working image:
     /// an edge line then needs more room for its points.
     outline_step: f32 = 1,
-    /// The part of `region` that is a page with another colour than white paper,
+    /// The parts of `region` that are pages with another colour than white paper,
     /// in pixels of the half-size image. Only the line search finds such a page.
-    colored_page: ?Quad = null,
+    colored_pages: [max_pages]?Quad = @splat(null),
     /// The factor from half-size coordinates to luma coordinates of the frame.
     scale: f32,
 
@@ -290,7 +290,7 @@ pub fn analyzeScene(allocator: Allocator, frame: image.FrameView, options: Optio
     // A bright region that lies on the frame border can be a wall or a desk, not
     // the paper. The outline search then looks for a book inside the frame.
     var outline_step: f32 = 1;
-    var colored_page: ?Quad = null;
+    var colored_pages: [max_pages]?Quad = @splat(null);
     if (options.outline_search and region.touches_border) {
         const likeness = try paperLikeness(allocator, region);
         if (likeness < options.good_likeness) {
@@ -306,7 +306,7 @@ pub fn analyzeScene(allocator: Allocator, frame: image.FrameView, options: Optio
                     region.deinit(allocator);
                     region = found.region;
                     outline_step = found.step;
-                    colored_page = found.colored_page;
+                    colored_pages = found.colored_pages;
                 }
             }
         }
@@ -319,7 +319,7 @@ pub fn analyzeScene(allocator: Allocator, frame: image.FrameView, options: Optio
         .separability = split.separability,
         .region = region,
         .outline_step = outline_step,
-        .colored_page = colored_page,
+        .colored_pages = colored_pages,
         .scale = Scene.half_scale,
     };
 }
@@ -400,9 +400,9 @@ const OutlineRegion = struct {
     region: raster.Region,
     /// The size of the steps of the outline of the region, in pixels of the planes.
     step: f32,
-    /// The part of the region that is a page with another colour than white
+    /// The parts of the region that are pages with another colour than white
     /// paper, in pixels of the planes.
-    colored_page: ?Quad = null,
+    colored_pages: [max_pages]?Quad = @splat(null),
 };
 
 /// The region of a search when it is more like a sheet of paper than the bright
@@ -906,6 +906,18 @@ const max_fold_degrees = 45;
 /// of its four sides has another colour than the page, for all pixels and not
 /// only for the bright ones. The first page is one of those sides.
 const min_other_sides_colored = 3;
+/// A book can show two pages that are not white paper, and then no page of
+/// white paper is the first page. One quad with a colour is not enough for a
+/// page: a mat, a picture frame, and a closed laptop on the desk are such quads
+/// too. Two such quads with a fold between them are an open book. The search
+/// tries this many quads, the best first, for a second page across a fold.
+const colored_first_pages = 8;
+/// The two pages of an open book have one size. For two pages that are not
+/// white paper, the areas of the two quads agree within this factor. A thing
+/// that lies on a mat, with a part of the mat next to it, is a pair of quads
+/// with a common side too, but not with one size. The camera does not look
+/// straight down, so the factor is not 1.
+const max_colored_area_ratio = 1.2;
 
 /// A quad of four lines that is a page.
 const PageQuad = struct {
@@ -1098,10 +1110,13 @@ const LineSearch = struct {
     /// The second page can be a page that is not white paper. Paper wins when
     /// the two kinds of page are possible.
     fn secondPage(self: LineSearch, first_page: PageQuad, pairs: []const [2]u8) ?PageQuad {
-        return self.secondPageOf(first_page, pairs, .paper) orelse self.secondPageOf(first_page, pairs, .colored);
+        return self.secondPageOf(first_page, pairs, .paper, max_page_area_ratio) orelse
+            self.secondPageOf(first_page, pairs, .colored, max_page_area_ratio);
     }
 
-    fn secondPageOf(self: LineSearch, first_page: PageQuad, pairs: []const [2]u8, inside: Inside) ?PageQuad {
+    /// The best quad with the inside `inside` across a fold of `first_page`, with
+    /// an area within the factor `max_area_ratio` of the area of that page.
+    fn secondPageOf(self: LineSearch, first_page: PageQuad, pairs: []const [2]u8, inside: Inside, max_area_ratio: f32) ?PageQuad {
         const items = self.found.items;
         const middle = Quad.fromCorners(first_page.corners).center();
         var best: ?PageQuad = null;
@@ -1122,9 +1137,9 @@ const LineSearch = struct {
                     // On the other side of the fold, with about the size of the first page.
                     if (fold_line.signedDistance(Quad.fromCorners(candidate.corners).center()) * page_side >= 0) continue;
                     const ratio = candidate.area / first_page.area;
-                    if (ratio > max_page_area_ratio or ratio < 1.0 / max_page_area_ratio) continue;
+                    if (ratio > max_area_ratio or ratio < 1.0 / max_area_ratio) continue;
                     // The side of the candidate on the fold is its last side.
-                    const from = candidate.corners[3].dot(along);
+                    const from = candidate.corners[fold_side_of_second].dot(along);
                     const to = candidate.corners[0].dot(along);
                     const common = @min(@max(page_from, page_to), @max(from, to)) - @max(@min(page_from, page_to), @min(from, to));
                     const longest = @max(@abs(page_to - page_from), @abs(to - from));
@@ -1135,6 +1150,34 @@ const LineSearch = struct {
         }
         return best;
     }
+
+    /// The two pages of an open book when no page is white paper: the best quad
+    /// that is not bright and has a second such quad across a fold. `pairs` has
+    /// the pairs of lines that go about one way.
+    fn coloredSpread(self: LineSearch, pairs: []const [2]u8) ?[2]PageQuad {
+        // The best quads, the one with the highest score first.
+        var firsts: [colored_first_pages]PageQuad = undefined;
+        var count: usize = 0;
+        for (pairs, 0..) |first, index| {
+            for (pairs[index + 1 ..]) |second| {
+                if (first[0] == second[0] or first[0] == second[1] or first[1] == second[0] or first[1] == second[1]) continue;
+                const lowest = if (count == firsts.len) firsts[count - 1].score else 0;
+                const candidate = self.page(first, second, lowest, .colored) orelse continue;
+                var place = @min(count, firsts.len - 1);
+                while (place > 0 and firsts[place - 1].score < candidate.score) : (place -= 1) firsts[place] = firsts[place - 1];
+                firsts[place] = candidate;
+                count = @min(count + 1, firsts.len);
+            }
+        }
+        for (firsts[0..count]) |first_page| {
+            const second_page = self.secondPageOf(first_page, pairs, .colored, max_colored_area_ratio) orelse continue;
+            return .{ first_page, second_page };
+        }
+        return null;
+    }
+
+    /// The side of a second page that lies on the fold: its last side.
+    const fold_side_of_second = 3;
 
     /// The corners of a quad of the field in pixels of the paper mask.
     fn inMask(self: LineSearch, corners: [4]Point) [4]Point {
@@ -1218,19 +1261,26 @@ fn lineRegion(allocator: Allocator, field: StepField, paper: PaperMask) Allocato
             best = search.page(first, second, if (best) |page_quad| page_quad.score else 0, .paper) orelse continue;
         }
     }
-    const first_page = best orelse return null;
+    // One page of white paper, with the page across the fold when it is there.
+    // Or, with no white paper, the two pages of an open book.
+    var found_pages: [max_pages]?PageQuad = @splat(null);
+    if (best) |first_page| {
+        found_pages = .{ first_page, search.secondPage(first_page, pairs[0..pair_count]) };
+    } else if (search.coloredSpread(pairs[0..pair_count])) |spread| {
+        found_pages = .{ spread[0], spread[1] };
+    } else return null;
 
     const mask = try Plane.initFilled(allocator, paper.bright.width, paper.bright.height, 0);
     defer mask.deinit(allocator);
-    fillQuad(mask, search.inMask(first_page.corners));
-    var colored_page: ?Quad = null;
-    if (search.secondPage(first_page, pairs[0..pair_count])) |second_page| {
-        const corners = search.inMask(second_page.corners);
+    var colored_pages: [max_pages]?Quad = @splat(null);
+    for (found_pages, &colored_pages) |maybe_page, *colored| {
+        const page_quad = maybe_page orelse continue;
+        const corners = search.inMask(page_quad.corners);
         fillQuad(mask, corners);
-        if (second_page.colored) colored_page = Quad.fromCorners(corners);
+        if (page_quad.colored) colored.* = Quad.fromCorners(corners);
     }
     const region = (try raster.largestRegion(allocator, mask)) orelse return null;
-    return .{ .region = region, .step = @floatFromInt(field.factor), .colored_page = colored_page };
+    return .{ .region = region, .step = @floatFromInt(field.factor), .colored_pages = colored_pages };
 }
 
 // endregion: line search
@@ -1844,7 +1894,10 @@ pub fn detectLayout(allocator: Allocator, scene: *const Scene, options: Options)
         layout.clipped_edges[index] = clippedEdges(in_image, scene.luma.width, scene.luma.height);
         // One page over the two pages of the book is not one colour.
         if (layout.kind == .spread) {
-            if (scene.colored_page) |colored| layout.colored[index] = colored.contains(in_image.center());
+            for (scene.colored_pages) |maybe_colored| {
+                const colored = maybe_colored orelse continue;
+                if (colored.contains(in_image.center())) layout.colored[index] = true;
+            }
         }
         page.* = .{
             .tl = scene.toFrame(in_image.tl),
@@ -2683,17 +2736,38 @@ const WhiteDesk = struct {
         .{ .from = flap_page.bl, .to = flap_page.tl },
         .{ .from = flap_page.tr, .to = flap_page.br },
     };
-    const flap_luma = 150;
-    const flap_u = 90;
-    const flap_v = 170;
+    /// A surface that is not paper: its luma and its chroma.
+    const Tint = struct { luma: u8, u: u8, v: u8 };
+    const orange: Tint = .{ .luma = 150, .u = 90, .v = 170 };
+    const dark_blue: Tint = .{ .luma = 90, .u = 150, .v = 110 };
+    const green: Tint = .{ .luma = 120, .u = 110, .v = 100 };
+    /// A part of a mat to the left of a thing: a quad with a side in common with
+    /// the thing, and with less than two thirds of its area.
+    const mat_part: Quad = .{ .tl = Point.init(210, 110), .tr = Point.init(310, 110), .br = Point.init(310, 390), .bl = Point.init(210, 390) };
 
-    const Kind = enum { single, book, flap };
+    /// `flap`: the open book with the flap as its left half. `colors`: the same
+    /// book with two halves that are not paper. `mat`: a thing with the colour
+    /// of an orange, and a part of a green mat to its left. The last two have no
+    /// line around a half: the colours make the steps.
+    const Kind = enum { single, book, flap, colors, mat };
+    const no_sides = [_]Side{};
 
     fn sidesOf(kind: Kind) []const Side {
         return switch (kind) {
             .single => &single_sides,
             .book => &book_sides,
             .flap => &flap_sides,
+            .colors, .mat => &no_sides,
+        };
+    }
+
+    /// The surface that is not paper at a point, or null for paper and desk.
+    fn coloredAt(kind: Kind, point: Point) ?Tint {
+        return switch (kind) {
+            .single, .book => null,
+            .flap => if (flap_page.contains(point)) orange else null,
+            .colors => if (flap_page.contains(point)) orange else if (paper_page.contains(point)) dark_blue else null,
+            .mat => if (mat_part.contains(point)) green else if (paper_page.contains(point)) orange else null,
         };
     }
 
@@ -2741,9 +2815,10 @@ const WhiteDesk = struct {
                 if (x > 560 and y > 420) return thing_luma;
                 on_page = paper_page.contains(point);
             },
+            .colors, .mat => {},
         }
         var surface = if (on_page) desk_luma + paper_part * (page_luma - desk_luma) else desk_luma;
-        if (kind == .flap and flap_page.contains(point)) surface = flap_luma;
+        if (coloredAt(kind, point)) |colored| surface = @floatFromInt(colored.luma);
         return @intFromFloat(@round(surface + line_part * (outline_luma - surface)));
     }
 
@@ -2759,6 +2834,7 @@ const WhiteDesk = struct {
             .single => single_page.contains(point) and !onThing(x, y),
             .book => left_page.contains(point) or right_page.contains(point),
             .flap => paper_page.contains(point),
+            .colors, .mat => false,
         };
     }
 
@@ -2776,9 +2852,9 @@ const WhiteDesk = struct {
                 const fy: f32 = @floatFromInt(2 * y);
                 // In a soft shadow, the paper has the colour of the desk too.
                 const part = if (onPaper(kind, fx, fy)) paperPart(kind, Point.init(fx, fy)) else 0;
-                const on_flap = kind == .flap and flap_page.contains(Point.init(fx, fy));
-                buffer[luma_size + y * chroma_width + x] = if (on_flap) flap_u else @intFromFloat(@round(neutral + part * (paper_u - neutral)));
-                buffer[luma_size + chroma_size + y * chroma_width + x] = if (on_flap) flap_v else @intFromFloat(@round(neutral + part * (paper_v - neutral)));
+                const colored = coloredAt(kind, Point.init(fx, fy));
+                buffer[luma_size + y * chroma_width + x] = if (colored) |tint| tint.u else @intFromFloat(@round(neutral + part * (paper_u - neutral)));
+                buffer[luma_size + chroma_size + y * chroma_width + x] = if (colored) |tint| tint.v else @intFromFloat(@round(neutral + part * (paper_v - neutral)));
             }
         }
         return .{ .buffer = buffer, .view = image.FrameView.fromPacked(buffer, width, height, .{}) };
@@ -2842,7 +2918,8 @@ test "the second page of an open book can be a page that is not white paper" {
     try testing.expect(scene.region.min_x <= 150 / 2 + tolerance);
     try testing.expect(scene.region.max_x >= 470 / 2 - tolerance);
     // The coloured page is the left half.
-    const colored = scene.colored_page.?;
+    const colored = scene.colored_pages[1].?;
+    try testing.expect(scene.colored_pages[0] == null);
     try testing.expect(colored.contains(Point.init(230.0 / 2.0, 250.0 / 2.0)));
     try testing.expect(!colored.contains(Point.init(390.0 / 2.0, 250.0 / 2.0)));
 
@@ -2858,12 +2935,42 @@ test "the second page of an open book can be a page that is not white paper" {
     try testing.expectEqual([max_pages]bool{ false, false }, single.colored);
 }
 
+test "an open book with two pages that are not white paper is found" {
+    const desk = try WhiteDesk.init(.colors);
+    defer desk.deinit();
+    const scene = (try analyzeScene(testing.allocator, desk.view, .{})).?;
+    defer scene.deinit(testing.allocator);
+    try testing.expect(!scene.region.touches_border);
+    const tolerance = 4;
+    try testing.expect(scene.region.min_x <= 150 / 2 + tolerance);
+    try testing.expect(scene.region.max_x >= 470 / 2 - tolerance);
+    try testing.expect(scene.colored_pages[0] != null and scene.colored_pages[1] != null);
+
+    const layout = (try detectLayout(testing.allocator, &scene, .{})).?;
+    try testing.expectEqual(LayoutKind.spread, layout.kind);
+    try testing.expectEqual([max_pages]bool{ true, true }, layout.colored);
+    try testing.expectApproxEqAbs(@as(f32, 310), layout.pages[0].tr.x, 8);
+    try testing.expectApproxEqAbs(@as(f32, 150), layout.pages[0].tl.x, 8);
+    try testing.expectApproxEqAbs(@as(f32, 470), layout.pages[1].tr.x, 8);
+}
+
+test "a thing on a mat is not an open book: the two quads have not one size" {
+    const desk = try WhiteDesk.init(.mat);
+    defer desk.deinit();
+    // No quad is white paper, and the pair is no book: the bright region stays,
+    // and it is the desk.
+    const scene = (try analyzeScene(testing.allocator, desk.view, .{})).?;
+    defer scene.deinit(testing.allocator);
+    try testing.expect(scene.region.touches_border);
+    try testing.expectEqual([max_pages]?Quad{ null, null }, scene.colored_pages);
+}
+
 test "the two white pages of an open book are not coloured pages" {
     const desk = try WhiteDesk.init(.book);
     defer desk.deinit();
     const scene = (try analyzeScene(testing.allocator, desk.view, .{})).?;
     defer scene.deinit(testing.allocator);
-    try testing.expect(scene.colored_page == null);
+    try testing.expectEqual([max_pages]?Quad{ null, null }, scene.colored_pages);
     const layout = (try detectLayout(testing.allocator, &scene, .{})).?;
     try testing.expectEqual([max_pages]bool{ false, false }, layout.colored);
 }

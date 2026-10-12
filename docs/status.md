@@ -81,7 +81,7 @@ finger is lost: `--fingers blank` and `--fingers keep` change the rule.
 | `detect.zig`: paper mask, edge lines, fold of a spread, page quads, clipped edges | Works on stable frames of the benchmark. Tests use synthetic frames. |
 | `detect.zig`: the outline search for a book on a surface as bright as its pages (decisions 0024 and 0027) | Works on one phone video of a bright room: the pages of the PDF are pages of the book, on the desktop and in the app on the phone. The benchmark keeps the same bytes. The search accepts a region only when another surface lies around it, so a block of text on a page is not the paper. Not for a page that runs out of the frame. |
 | `lines.zig`, and the line search of `detect.zig`: a page on a bright desk by its four straight edges (decisions 0026 and 0029) | Works on one recording of a white desk with a wood grain and things around the book, and on one scan with the camera of the phone. Each line is the edge that it came from, so the page stays in nearly each frame of a steady view: runs of 98 to 109 frames in the camera scan, before 4 to 36. Not for a page that runs out of the frame, not for white paper on a desk of the same white, and not with a hand on more than 30 % of one side. |
-| A page that is not white paper: a coloured page, or the flap of a cover (decision 0028) | Works on the same recording: the left half of the open book, orange and pink, is the first of 2 pages, with its colours. Only as the second page next to a page of white paper, and only with the line search. Such a page comes from one frame: no donor frame repairs it, and a hand on it is not seen. |
+| A page that is not white paper: a coloured page, or the flap of a cover (decisions 0028 and 0030) | Works on one recording and on one scan with the camera: the flap of the cover, dark pages, and orange pages are pages of the PDF, with their colours. Such a page is next to a page of white paper, or it is one of two pages of an open book with one size. Only with the line search. Such a page comes from one frame: no donor frame repairs it, and a hand on it is not seen. |
 | `observe.zig`: page thumbnail, covered cells, frame similarity | Done, tested |
 | `timeline.zig`: stable runs of frames, one reference frame per spread | Works, but splits some spreads in two |
 | `document.zig`: one page size for all pages | Done, tested |
@@ -235,16 +235,17 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
   book is inside the frame, the detector changes between the whole book and
   one page from frame to frame, which gives too many views (decision 0027,
   "Limits").
-- **A spread with no page of white paper gives no page.** A dark page next to
-  an orange page, and a closed book with a coloured cover, are not found: the
-  first page of the line search must be bright paper (decisions 0026 and 0028).
-  The camera scan of 2026-10-12 has two such spreads, and a second scan of the
-  closed book gives 0 pages.
+- **A closed book with a coloured cover gives no page.** One quad with a colour
+  is not enough for a page: a mat or a picture frame on the desk is such a quad
+  too (decision 0030). A scan of the closed book of 2026-10-12 gives 0 pages.
+- **A hand on a page that is not white paper is in the result.** The program
+  does not see it (decision 0028). One orange page of the camera scan shows the
+  fingers of the user.
 - **A second copy of a page with little texture.** The duplicate search wants
   50 % of the textured parts of a page again. A title page with three lines of
-  large letters gives 46 % for two views of it, so the camera scan has 7 pages
-  in two passes, where 6 are correct (decision 0029, "Limits"). The stream mode
-  gives 6.
+  large letters gives 46 % for two views of it, so the camera scan has 11 pages
+  in two passes, where 10 are correct (decision 0029, "Limits"). The stream
+  mode gives 10.
 - **A coloured page on a dark desk is not in the result.** Only the line
   search finds a page that is not white paper, and it runs only when the
   surface around the book is bright (decision 0028). On a dark desk the white
