@@ -52,6 +52,10 @@ pub const Options = struct {
     /// The region of the outline search must be better than the bright region by
     /// this much.
     likeness_margin: f32 = 0.15,
+    /// This part of the outline of the region of the outline search must have
+    /// another surface outside: a desk or a floor. A block of text on a page has
+    /// its own paper around it. See `otherSurfacePart` (decision 0027).
+    min_other_surface: f32 = 0.6,
     /// A pixel is a part of an outline when the luma changes by more than this
     /// many codes from one pixel to the next one, after a small blur.
     outline_step: f32 = 3.5,
@@ -285,7 +289,7 @@ pub fn analyzeScene(allocator: Allocator, frame: image.FrameView, options: Optio
             const planes: OutlinePlanes = .{ .luma = luma.view(), .u = frame.u, .v = frame.v, .width = width, .height = height };
             if (try stepField(allocator, planes, options)) |field| {
                 defer field.deinit(allocator);
-                var better = try betterRegion(allocator, try outlineRegion(allocator, field, opened, options), likeness, options);
+                var better = try betterRegion(allocator, try outlineRegion(allocator, field, planes, opened, options), likeness, options);
                 if (better == null and options.line_search) {
                     const paper: PaperMask = .{ .bright = opened, .u = frame.u, .v = frame.v };
                     better = try betterRegion(allocator, try lineRegion(allocator, field, paper), likeness, options);
@@ -327,6 +331,11 @@ const min_scene_side = 32;
 // The flood enters a page that runs out of the frame. So the bright region stays
 // the first choice, and the search is for a book that lies inside the frame.
 //
+// A block of text on a page has a closed line of steps around it too, and so has
+// a picture. When the flood is inside a page, such a block is all that the flood
+// leaves. So the region of the search is the paper only when another surface
+// lies around it: see `otherSurfacePart`.
+//
 // The idea to take, among several shapes of a frame, the shape most like a sheet
 // of paper is from E. Carlinet and T. Géraud, the method of the LRDE in J.-C.
 // Burie et al., "ICDAR2015 Competition on Smartphone Document Capture and OCR
@@ -351,6 +360,21 @@ const border_likeness_weight = 3.0;
 /// operator.
 const blur_weight_sum = 16.0;
 const sobel_weight_sum = 8.0;
+/// The outline of a region is cut into this many directions from the middle of
+/// the region, each with its own check of the surface outside. The light changes
+/// across a page, so the two sides of the outline are compared at one place.
+const surface_sectors = 16;
+/// The surface outside is what the flood reached within this many pixels of the
+/// region.
+const surface_reach = 4;
+/// A direction needs this many flat pixels inside, and this many outside.
+const min_surface_pixels = 4;
+/// The surface outside is another surface when it is darker than the flat paper
+/// inside by this many codes of luma. The same holds for a difference of
+/// `min_surface_chroma` codes of chroma.
+const min_darker_surface = 12.0;
+/// The tangent of 22.5 degrees: the half of an octant.
+const half_octant_slope = 0.41421356;
 
 /// The planes of a frame for the outline search, all with one size.
 const OutlinePlanes = struct {
@@ -524,11 +548,120 @@ fn smallestRectangleArea(hull: []const Point) f32 {
     return if (std.math.isInf(best)) 0 else best;
 }
 
+/// The sum of the pixels of one surface.
+const SurfaceSum = struct {
+    count: u32 = 0,
+    luma: u32 = 0,
+    u: u32 = 0,
+    v: u32 = 0,
+
+    /// Add the pixel of the planes in the middle of the pixel (`x`, `y`) of a
+    /// field with the factor `factor`.
+    fn add(self: *SurfaceSum, planes: OutlinePlanes, factor: u32, x: usize, y: usize) void {
+        const plane_x = @min(x * factor + factor / 2, planes.width - 1);
+        const plane_y = @min(y * factor + factor / 2, planes.height - 1);
+        self.count += 1;
+        self.luma += planes.luma.at(plane_x, plane_y);
+        self.u += planes.u.at(plane_x, plane_y);
+        self.v += planes.v.at(plane_x, plane_y);
+    }
+
+    fn mean(self: SurfaceSum, sum: u32) f32 {
+        return @as(f32, @floatFromInt(sum)) / @as(f32, @floatFromInt(self.count));
+    }
+
+    /// True when `outside` is another surface than `self`, the flat paper inside
+    /// a region. A brighter surface with the colour of the paper is not: a block
+    /// of text that is not sharp, and a box with a tint, are darker than the
+    /// paper around them.
+    fn differsFrom(self: SurfaceSum, outside: SurfaceSum) bool {
+        const chroma = @abs(outside.mean(outside.u) - self.mean(self.u)) + @abs(outside.mean(outside.v) - self.mean(self.v));
+        if (chroma >= min_surface_chroma) return true;
+        return outside.mean(outside.luma) <= self.mean(self.luma) - min_darker_surface;
+    }
+};
+
+/// One of `surface_sectors` directions of equal size, for a vector that is not zero.
+fn surfaceSector(dx: f32, dy: f32) usize {
+    const across = @abs(dx);
+    const down = @abs(dy);
+    // The octant, and then the half of the octant.
+    var sector: usize = 0;
+    if (dx < 0) sector |= 1;
+    if (dy < 0) sector |= 2;
+    if (down > across) sector |= 4;
+    if (@min(across, down) > half_octant_slope * @max(across, down)) sector |= 8;
+    return sector;
+}
+
+/// The part of the outline of a region that has another surface outside, from 0
+/// to 1. A sheet of paper lies on another surface: a desk, or a floor. A block of
+/// text on a page has its own paper around it.
+///
+/// The function compares flat places only: pixels with no step. Inside the
+/// region they are free paper, such as a margin. Outside they are the surface
+/// that the flood reached. Text is not flat, so it does not change the result.
+/// A direction with too few flat pixels on one side is not a sign of another
+/// surface.
+///
+/// `walls` and `reached` are the planes of the flood: a pixel that the flood
+/// reached has no step. `planes` has the frame, at `factor` pixels for one pixel
+/// of the region.
+fn otherSurfacePart(
+    allocator: Allocator,
+    planes: OutlinePlanes,
+    factor: u32,
+    walls: Plane,
+    reached: Plane,
+    region: raster.Region,
+) Allocator.Error!f32 {
+    const mask = region.mask;
+    const near = try repeatMorphology(allocator, mask, surface_reach, raster.dilate3);
+    defer near.deinit(allocator);
+
+    // The middle of the box around the region.
+    const middle_x = 0.5 * @as(f32, @floatFromInt(region.min_x + region.max_x));
+    const middle_y = 0.5 * @as(f32, @floatFromInt(region.min_y + region.max_y));
+    var inside: [surface_sectors]SurfaceSum = @splat(.{});
+    var outside: [surface_sectors]SurfaceSum = @splat(.{});
+    var outline: [surface_sectors]u32 = @splat(0);
+    const last_x = mask.width - 1;
+    const last_y = mask.height - 1;
+    for (region.min_y -| surface_reach..@min(region.max_y + surface_reach, last_y) + 1) |y| {
+        const dy = @as(f32, @floatFromInt(y)) - middle_y;
+        for (region.min_x -| surface_reach..@min(region.max_x + surface_reach, last_x) + 1) |x| {
+            const in_region = mask.at(x, y) != 0;
+            if (!in_region and near.at(x, y) == 0) continue;
+            const sector = surfaceSector(@as(f32, @floatFromInt(x)) - middle_x, dy);
+            if (!in_region) {
+                if (reached.at(x, y) != 0) outside[sector].add(planes, factor, x, y);
+                continue;
+            }
+            if (walls.at(x, y) == 0) inside[sector].add(planes, factor, x, y);
+            const on_outline = x == 0 or y == 0 or x == last_x or y == last_y or
+                mask.at(x - 1, y) == 0 or mask.at(x + 1, y) == 0 or
+                mask.at(x, y - 1) == 0 or mask.at(x, y + 1) == 0;
+            if (on_outline) outline[sector] += 1;
+        }
+    }
+
+    var total: u32 = 0;
+    var other: u32 = 0;
+    for (inside, outside, outline) |paper, surface, length| {
+        total += length;
+        if (paper.count < min_surface_pixels or surface.count < min_surface_pixels) continue;
+        if (paper.differsFrom(surface)) other += length;
+    }
+    if (total == 0) return 0;
+    return @as(f32, @floatFromInt(other)) / @as(f32, @floatFromInt(total));
+}
+
 /// Find the paper as the largest region that a flood from the frame border does
-/// not reach. `field` has the steps of the frame. `bright` is the paper mask of
-/// the frame: a hand on the book is inside the outline of the book, and it is not
-/// bright. Returns null when the flood leaves no region of the smallest size.
-fn outlineRegion(allocator: Allocator, field: StepField, bright: Plane, options: Options) Allocator.Error!?OutlineRegion {
+/// not reach. `field` has the steps of the frame, and `planes` the frame.
+/// `bright` is the paper mask of the frame: a hand on the book is inside the
+/// outline of the book, and it is not bright. Returns null when the flood leaves
+/// no region of the smallest size, or a region with its own paper around it.
+fn outlineRegion(allocator: Allocator, field: StepField, planes: OutlinePlanes, bright: Plane, options: Options) Allocator.Error!?OutlineRegion {
     const factor = field.factor;
     const width = field.width;
     const height = field.height;
@@ -541,10 +674,12 @@ fn outlineRegion(allocator: Allocator, field: StepField, bright: Plane, options:
     const walls = try raster.dilate3(allocator, thin_walls);
     defer walls.deinit(allocator);
 
+    const reached = try raster.floodFromBorder(allocator, walls);
+    defer reached.deinit(allocator);
     // What the flood does not reach: the walls and all that they enclose.
-    const enclosed = try raster.floodFromBorder(allocator, walls);
+    const enclosed = try Plane.init(allocator, width, height);
     defer enclosed.deinit(allocator);
-    for (enclosed.data) |*value| value.* = if (value.* == 0) raster.mask_set else 0;
+    for (enclosed.data, reached.data) |*value, flooded| value.* = if (flooded == 0) raster.mask_set else 0;
     const without_lines = try repeatMorphology(allocator, enclosed, thin_line_half_width, raster.erode3);
     defer without_lines.deinit(allocator);
     const solid = try repeatMorphology(allocator, without_lines, thin_line_half_width, raster.dilate3);
@@ -553,6 +688,8 @@ fn outlineRegion(allocator: Allocator, field: StepField, bright: Plane, options:
     const blob = (try raster.largestRegion(allocator, solid)) orelse return null;
     defer blob.deinit(allocator);
     if (@as(f32, @floatFromInt(blob.area)) < options.min_area_fraction * @as(f32, @floatFromInt(pixel_count))) return null;
+    // A block of text or a picture on a page, with its own paper around it.
+    if (try otherSurfacePart(allocator, planes, factor, walls, reached, blob) < options.min_other_surface) return null;
     // The outline of the paper is in the middle of its walls.
     const tight = try repeatMorphology(allocator, blob.mask, wall_half_width, raster.erode3);
     defer tight.deinit(allocator);
@@ -2186,6 +2323,11 @@ const BrightRoom = struct {
 
     /// `scale` is 1 for a frame of 640 x 480 pixels.
     fn init(scale: u32) !BrightRoom {
+        return initWithPaper(scale, cream_u, cream_v);
+    }
+
+    /// A room with a page that has the chroma `paper_u` and `paper_v`.
+    fn initWithPaper(scale: u32, paper_u: u8, paper_v: u8) !BrightRoom {
         const width = 640 * scale;
         const height = 480 * scale;
         const buffer = try testing.allocator.alloc(u8, image.packedFrameSize(width, height));
@@ -2223,8 +2365,8 @@ const BrightRoom = struct {
         for (0..height / 2) |y| {
             for (0..chroma_width) |x| {
                 const on_page = Paint.at(page, unit, @floatFromInt(2 * x), @floatFromInt(2 * y))[1];
-                buffer[luma_size + y * chroma_width + x] = if (on_page) cream_u else neutral;
-                buffer[luma_size + chroma_size + y * chroma_width + x] = if (on_page) cream_v else neutral;
+                buffer[luma_size + y * chroma_width + x] = if (on_page) paper_u else neutral;
+                buffer[luma_size + chroma_size + y * chroma_width + x] = if (on_page) paper_v else neutral;
             }
         }
         return .{
@@ -2322,6 +2464,78 @@ test "the outline search frees its memory when an allocation fails" {
         }
     };
     try alloc_check.eachFailure(testing.allocator, Run.run, .{room.view});
+}
+
+test "a white book on a floor of the same colour is found when the floor is darker" {
+    // The page and the floor differ in brightness only: 200 and 185.
+    const room = try BrightRoom.initWithPaper(1, BrightRoom.neutral, BrightRoom.neutral);
+    defer room.deinit();
+    const scene = (try analyzeScene(testing.allocator, room.view, .{ .layout = .single })).?;
+    defer scene.deinit(testing.allocator);
+    try testing.expect(!scene.region.touches_border);
+    const layout = (try detectLayout(testing.allocator, &scene, .{ .layout = .single })).?;
+    const tolerance = 4.0;
+    try expectPointNear(room.page.tl, layout.pages[0].tl, tolerance);
+    try expectPointNear(room.page.br, layout.pages[0].br, tolerance);
+}
+
+/// A page that runs out of the frame at three sides, with a table on it: a frame
+/// line, rows of text that are not sharp, and a band of free paper. The table has
+/// a closed outline, and the flood from the frame border runs around it.
+const TablePage = struct {
+    const table_left = 90;
+    const table_right = 230;
+    const table_top = 50;
+    const table_bottom = 170;
+    const line_width = 4;
+    const band_top = 100;
+    const band_bottom = 124;
+    const desk_top = 210;
+    const text_luma = 160;
+    const text_period = 8;
+
+    fn luma(_: void, x: f32, y: f32) ?u8 {
+        if (y >= desk_top) return null;
+        if (x < table_left or x >= table_right or y < table_top or y >= table_bottom) return TestFrame.paper_luma;
+        const on_line = x < table_left + line_width or x >= table_right - line_width or
+            y < table_top + line_width or y >= table_bottom - line_width;
+        if (on_line) return text_luma;
+        if (y >= band_top and y < band_bottom) return TestFrame.paper_luma;
+        return if (@mod(y, text_period) < text_period / 2) text_luma else TestFrame.paper_luma;
+    }
+};
+
+test "a table on a page is not the paper: its own paper lies around it" {
+    const frame = try TestFrame.init({}, TablePage.luma);
+    defer frame.deinit();
+
+    // With no check of the surface, the outline search takes the table for the paper.
+    const loose = (try analyzeScene(testing.allocator, frame.view, .{ .min_other_surface = 0 })).?;
+    defer loose.deinit(testing.allocator);
+    try testing.expect(!loose.region.touches_border);
+    try testing.expect(loose.region.min_x >= TablePage.table_left / 2 - 4 and loose.region.max_x <= TablePage.table_right / 2 + 4);
+
+    // With the check, the bright region stays: the page, which runs out of the frame.
+    const scene = (try analyzeScene(testing.allocator, frame.view, .{})).?;
+    defer scene.deinit(testing.allocator);
+    try testing.expect(scene.region.touches_border);
+    try testing.expectEqual(@as(u32, 0), scene.region.min_x);
+    try testing.expectEqual(@as(u32, 0), scene.region.min_y);
+}
+
+test "the directions around a region are 16 sectors of one size" {
+    var seen: [surface_sectors]bool = @splat(false);
+    for (0..surface_sectors) |index| {
+        // The middle of each sector of 22.5 degrees.
+        const angle = std.math.degreesToRadians((@as(f32, @floatFromInt(index)) + 0.5) * 360.0 / surface_sectors);
+        const sector = surfaceSector(@cos(angle), @sin(angle));
+        try testing.expect(sector < surface_sectors);
+        try testing.expect(!seen[sector]);
+        seen[sector] = true;
+        // A point a little off the middle is in the same sector.
+        const near = angle + std.math.degreesToRadians(8.0);
+        try testing.expectEqual(sector, surfaceSector(@cos(near), @sin(near)));
+    }
 }
 
 /// A frame of a white desk with one page or with the two pages of an open book.

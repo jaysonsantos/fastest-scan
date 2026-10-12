@@ -79,7 +79,7 @@ finger is lost: `--fingers blank` and `--fingers keep` change the rule.
 | `pdf.zig`: PDF writer with a byte callback | Done, tested. `pdfinfo` reads the file. |
 | `raster.zig`: halving, histogram, Otsu, 3x3 morphology, largest region | Done, tested |
 | `detect.zig`: paper mask, edge lines, fold of a spread, page quads, clipped edges | Works on stable frames of the benchmark. Tests use synthetic frames. |
-| `detect.zig`: the outline search for a book on a surface as bright as its pages (decision 0024) | Works on one phone video of a bright room: the pages of the PDF are pages of the book, on the desktop and in the app on the phone. The benchmark keeps the same bytes. Not for a page that runs out of the frame. |
+| `detect.zig`: the outline search for a book on a surface as bright as its pages (decisions 0024 and 0027) | Works on one phone video of a bright room: the pages of the PDF are pages of the book, on the desktop and in the app on the phone. The benchmark keeps the same bytes. The search accepts a region only when another surface lies around it, so a block of text on a page is not the paper. Not for a page that runs out of the frame. |
 | `lines.zig`, and the line search of `detect.zig`: a page on a bright desk by its four straight edges (decision 0026) | Works on one recording of a white desk with a wood grain and things around the book: the detector finds the page in all its frames. 12 other videos keep the same bytes of the PDF. Not for a page that runs out of the frame, and not for white paper on a desk of the same white. |
 | `observe.zig`: page thumbnail, covered cells, frame similarity | Done, tested |
 | `timeline.zig`: stable runs of frames, one reference frame per spread | Works, but splits some spreads in two |
@@ -172,8 +172,9 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
      them, and the page count is wrong on most: for example 7 pages where the
      true number of page views is 17. The desk is bright, the videos have 480 x
      270 pixels, and many books lie in a second direction. Decision 0018 has the
-     commands to get the videos. With the outline search of decision 0024 the
-     counts are too high: see "Known problems".
+     commands to get the videos. The outline search does not take a block of
+     text for the paper there any more (decision 0027). The counts stay wrong:
+     see "Known problems".
    - The detector with lines for low-contrast desks is done in a first form
      (decision 0026). What is left: the quad of the frame before as a prior (the
      best SmartDoc 2015 methods do this), and a page that runs out of the frame.
@@ -226,12 +227,17 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
 - **White paper on a desk of the same white.** The line search wants another
   colour of the surface around the page. When the outline search fails there
   too, the detector takes the desk for the paper.
-- **The PUCIT videos get too many pages since decision 0024.** The first eight
-  videos give 75, 45, 42, 55, 49, 18, 32, and 57 pages, where `main` gives 7, 4,
-  15, 4, 28, 9, 26, and 52, and a video has about 20 page views. The book is
-  larger than the frame there, and the outline search takes parts of a page for
-  the page. Its rule to accept a region is too loose for that case (decision
-  0026, "Limits").
+- **The page counts of the PUCIT videos are wrong.** The 37 videos show 763
+  page views, and the program gives 1669 pages: the count is within 25 % of
+  the views for 9 videos only. The books lie turned by a quarter turn,
+  which the split of a spread into two pages does not handle. When the whole
+  book is inside the frame, the detector changes between the whole book and
+  one page from frame to frame, which gives too many views (decision 0027,
+  "Limits").
+- **White paper in a shadow on a white desk in the light.** The outline search
+  wants another colour around its region, or a surface that is darker than the
+  paper (decision 0027). Such a sheet has neither, and the detector takes the
+  desk for the paper.
 - **Fast page turns with the hands on the book lose spreads.** In the phone
   video of 2026-10-12 (a paperback on a light grey floor, 49 seconds, 1920 x
   1080), the result has 7 pages: the cover and three spreads. The video shows
