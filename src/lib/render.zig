@@ -53,6 +53,9 @@ pub const SourceFrame = struct {
     /// detector runs again at the full size; these are the fallback.
     quads: [detect.max_pages]Quad,
     clipped_edges: [detect.max_pages]detect.ClippedEdges,
+    /// For each page, true when the analysis pass found a page that is not white
+    /// paper (`detect.Layout.colored`).
+    colored: [detect.max_pages]bool = @splat(false),
 };
 
 pub const PageImage = struct {
@@ -67,6 +70,9 @@ pub const PageImage = struct {
     outside_fraction: f32,
     /// True when the page was rendered with the curved page map.
     curled: bool,
+    /// True for a page that is not white paper. Such a page comes from its
+    /// reference frame alone, with its colours (decision 0028).
+    colored: bool = false,
     /// The number of donor frames that registered to the reference page.
     donors_used: u8,
     /// What the fusion found and repaired.
@@ -150,16 +156,19 @@ pub const SpreadSignature = struct {
 const FullLayout = struct {
     quads: [detect.max_pages]Quad,
     clipped_edges: [detect.max_pages]detect.ClippedEdges,
+    colored: [detect.max_pages]bool,
     outlines: [detect.max_pages]?curl.PageOutline,
     redetected: bool,
 };
 
 /// Find the pages of a full-size frame. When the detector fails or finds another
-/// layout than the analysis pass, the quads of the analysis pass stay.
+/// layout than the analysis pass, the quads of the analysis pass stay. Another
+/// layout is another number of pages, or another page that is not white paper.
 fn fullLayout(scratch: Allocator, source: SourceFrame, kind: detect.LayoutKind, options: Options) Allocator.Error!FullLayout {
     var layout: FullLayout = .{
         .quads = source.quads,
         .clipped_edges = source.clipped_edges,
+        .colored = source.colored,
         .outlines = @splat(null),
         .redetected = false,
     };
@@ -172,7 +181,7 @@ fn fullLayout(scratch: Allocator, source: SourceFrame, kind: detect.LayoutKind, 
     if (try detect.analyzeScene(scratch, source.frame, detect_options)) |scene| {
         defer scene.deinit(scratch);
         if (try detect.detectLayout(scratch, &scene, detect_options)) |found| {
-            if (found.kind == kind) {
+            if (found.kind == kind and std.mem.eql(bool, &found.colored, &source.colored)) {
                 layout.quads = found.pages;
                 layout.clipped_edges = found.clipped_edges;
                 layout.outlines = found.outlines;
@@ -188,6 +197,7 @@ fn analysisLayout(source: SourceFrame) FullLayout {
     return .{
         .quads = source.quads,
         .clipped_edges = source.clipped_edges,
+        .colored = source.colored,
         .outlines = @splat(null),
         .redetected = false,
     };
@@ -234,6 +244,39 @@ fn freePageMap(scratch: Allocator, map: resample.PageMap) void {
 
 const white = 255;
 
+/// A page that is not white paper has no blank paper that shows the light. The
+/// white page of the same spread has: this function gives the mean colour of
+/// its paper in the same frame. Null when the spread has no white page; the
+/// coloured page then keeps the colours of the camera.
+fn lightOfSpread(
+    scratch: Allocator,
+    frame: image.FrameView,
+    layout: *const FullLayout,
+    kind: detect.LayoutKind,
+    index: usize,
+    page_size: image.Size,
+    options: Options,
+) Allocator.Error!?[image.rgb_channels]f32 {
+    if (kind != .spread) return null;
+    const other = 1 - index;
+    if (layout.colored[other]) return null;
+    // The mean colour needs few pixels.
+    const size: image.Size = .{
+        .width = @max(1, page_size.width / light_page_divisor),
+        .height = @max(1, page_size.height / light_page_divisor),
+    };
+    const map = (try pageMap(scratch, frame, layout, other, size, page_size)) orelse return null;
+    defer freePageMap(scratch, map);
+    const outside = try image.Plane.init(scratch, size.width, size.height);
+    defer outside.deinit(scratch);
+    const warped = try resample.warpPage(scratch, frame, map, size, outside);
+    defer warped.deinit(scratch);
+    return try enhance.paperColor(scratch, warped, options.enhance);
+}
+
+/// The white page that gives the light has the page size divided by this number.
+const light_page_divisor = 4;
+
 /// The luma of an RGB page as an 8-bit plane.
 fn lumaPlane(allocator: Allocator, page: image.RgbF32) Allocator.Error!image.Plane {
     const plane = try image.Plane.init(allocator, page.width, page.height);
@@ -278,7 +321,14 @@ pub fn renderSignature(
         // No sharpening: the registration compares the structure, not fine edges.
         var enhance_options = options.enhance;
         enhance_options.sharpen_amount = 0;
-        try enhance.enhance(scratch, warped, enhance_options);
+        if (layout.colored[index]) {
+            if (try lightOfSpread(scratch, reference.frame, &layout, kind, index, page_size, options)) |paper| {
+                enhance.balance(warped, paper, enhance_options);
+            }
+            try enhance.finish(scratch, warped, enhance_options);
+        } else {
+            try enhance.enhance(scratch, warped, enhance_options);
+        }
 
         const luma = try lumaPlane(allocator, warped);
         var outside_count: usize = 0;
@@ -342,7 +392,17 @@ pub fn renderSpread(
         defer outside.deinit(scratch);
         const page = try resample.warpPage(scratch, reference.frame, map, page_size, outside);
         defer page.deinit(scratch);
-        try enhance.flatten(scratch, page, options.enhance);
+        // The flattening, the fusion, and the finger rule take white paper as
+        // given. A page that is not white paper comes from its reference frame
+        // alone, with the light of the white page next to it.
+        const colored = layout.colored[index];
+        if (colored) {
+            if (try lightOfSpread(scratch, reference.frame, &layout, kind, index, page_size, options)) |paper| {
+                enhance.balance(page, paper, options.enhance);
+            }
+        } else {
+            try enhance.flatten(scratch, page, options.enhance);
+        }
 
         var layers: std.ArrayList(fuse.Layer) = .empty;
         defer {
@@ -355,7 +415,7 @@ pub fn renderSpread(
         }
         try layers.append(scratch, .{ .page = page, .outside = outside });
 
-        if (donors.len > 0) {
+        if (donors.len > 0 and !colored) {
             // The registration compares the luma of the frames as the camera gave it.
             const reference_luma = try resample.warpLuma(scratch, reference.frame.y, map, page_size);
             defer reference_luma.deinit(scratch);
@@ -378,7 +438,10 @@ pub fn renderSpread(
 
         var scratch_faults: ?fuse.FaultMap = null;
         defer if (scratch_faults) |found| found.deinit(scratch);
-        const stats = try fuse.fuse(scratch, layers.items, options.fuse, if (options.fault_maps) &scratch_faults else null);
+        const stats: fuse.Stats = if (colored)
+            .{}
+        else
+            try fuse.fuse(scratch, layers.items, options.fuse, if (options.fault_maps) &scratch_faults else null);
         try enhance.finish(scratch, page, options.enhance);
 
         // The map goes to the caller, so a copy moves out of the working memory.
@@ -400,6 +463,7 @@ pub fn renderSpread(
             .quad = layout.quads[index],
             .clipped_edges = layout.clipped_edges[index],
             .curled = map.curved != null,
+            .colored = colored,
             .outside_fraction = @as(f32, @floatFromInt(outside_count)) / @as(f32, @floatFromInt(outside.data.len)),
             .donors_used = @intCast(layers.items.len - 1),
             .fusion = stats,
@@ -723,6 +787,107 @@ test "donor frames repair glare on the reference frame" {
     try testing.expect(fused.pages[0].rgb.pixel(x, y)[1] < 90);
     // A point of the bar outside the glare stays dark.
     try testing.expect(fused.pages[0].rgb.pixel(110, 85)[1] < 90);
+}
+
+/// A frame with a dark desk and an open book. The left half has the colour of
+/// an orange and a dark bar. The right half is white paper with dots.
+const book_left: Quad = .{
+    .tl = geometry.Point.init(40, 30),
+    .tr = geometry.Point.init(160, 30),
+    .br = geometry.Point.init(160, 210),
+    .bl = geometry.Point.init(40, 210),
+};
+const book_right: Quad = .{
+    .tl = geometry.Point.init(160, 30),
+    .tr = geometry.Point.init(280, 30),
+    .br = geometry.Point.init(280, 210),
+    .bl = geometry.Point.init(160, 210),
+};
+const book_page_size: image.Size = .{ .width = 120, .height = 180 };
+
+fn bookFrame(allocator: Allocator) ![]u8 {
+    const buffer = try allocator.alloc(u8, image.packedFrameSize(test_width, test_height));
+    for (0..test_height) |y| {
+        for (0..test_width) |x| {
+            const p = geometry.Point.init(@floatFromInt(x), @floatFromInt(y));
+            var value: u8 = 70;
+            if (book_left.contains(p)) {
+                value = if (y >= 100 and y < 125 and x >= 60 and x < 140) 60 else 150;
+            } else if (book_right.contains(p)) {
+                value = if ((x / 4 * 7 + y / 4 * 13) % 11 == 0) 120 else 200;
+            }
+            buffer[y * test_width + x] = value;
+        }
+    }
+    const luma_size = test_width * test_height;
+    const chroma_width = test_width / 2;
+    const chroma_size = chroma_width * (test_height / 2);
+    for (0..test_height / 2) |y| {
+        for (0..chroma_width) |x| {
+            const on_left = book_left.contains(geometry.Point.init(@floatFromInt(2 * x), @floatFromInt(2 * y)));
+            buffer[luma_size + y * chroma_width + x] = if (on_left) 90 else 128;
+            buffer[luma_size + chroma_size + y * chroma_width + x] = if (on_left) 170 else 128;
+        }
+    }
+    return buffer;
+}
+
+fn bookSource(buffer: []const u8) SourceFrame {
+    return .{
+        .frame = image.FrameView.fromPacked(buffer, test_width, test_height, .{}),
+        .quads = .{ book_left, book_right },
+        .clipped_edges = @splat(.none),
+        .colored = .{ true, false },
+    };
+}
+
+test "a page that is not white paper keeps its colours and takes no donor" {
+    const buffer = try bookFrame(testing.allocator);
+    defer testing.allocator.free(buffer);
+    const source = bookSource(buffer);
+    const donors = [_]SourceFrame{source};
+    const options: Options = .{ .register = .{ .tile = 16, .max_levels = 2 }, .fuse = .{ .cell = 4 } };
+
+    const spread = try renderSpread(testing.allocator, testing.allocator, source, &donors, .spread, null, book_page_size, options);
+    defer spread.deinit(testing.allocator);
+    try testing.expectEqual(@as(u8, 2), spread.page_count);
+    // The detector at the full size finds the white page only, which is another
+    // layout: the pages of the analysis pass stay.
+    try testing.expect(!spread.redetected);
+
+    const left = spread.pages[0];
+    try testing.expect(left.colored);
+    try testing.expectEqual(@as(u8, 0), left.donors_used);
+    // The colour of an orange: much red, little blue. With the flattening of
+    // white paper, the page is nearly white.
+    const orange = left.rgb.pixel(20, 20);
+    try testing.expect(orange[0] > 200);
+    try testing.expect(orange[2] < 120);
+    // The bar is dark.
+    try testing.expect(left.rgb.pixel(60, 82)[1] < 90);
+
+    const right = spread.pages[1];
+    try testing.expect(!right.colored);
+    try testing.expectEqual(@as(u8, 1), right.donors_used);
+    const paper = right.rgb.pixel(2, 2);
+    try testing.expect(paper[0] > 240 and paper[1] > 240 and paper[2] > 240);
+}
+
+test "the render of a page that is not white paper frees its memory when an allocation fails" {
+    const buffer = try bookFrame(testing.allocator);
+    defer testing.allocator.free(buffer);
+    const Run = struct {
+        fn run(allocator: Allocator, reference: SourceFrame) !void {
+            const options: Options = .{ .register = .{ .tile = 16, .max_levels = 2 }, .fuse = .{ .cell = 4 } };
+            const spread = try renderSpread(allocator, allocator, reference, &.{}, .spread, 0, book_page_size, options);
+            defer spread.deinit(allocator);
+            try testing.expect(spread.pages[0].colored);
+            const signature = try renderSignature(allocator, allocator, reference, .spread, book_page_size, options);
+            defer signature.deinit(allocator);
+            try testing.expectEqual(@as(u8, 2), signature.page_count);
+        }
+    };
+    try alloc_check.eachFailure(testing.allocator, Run.run, .{bookSource(buffer)});
 }
 
 test "the page render frees its memory when an allocation fails" {

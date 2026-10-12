@@ -192,6 +192,8 @@ const HeldFrame = struct {
     /// The page corners of the analysis, in luma pixels of the upright full-size frame.
     quads: [detect.max_pages]Quad,
     clipped_edges: [detect.max_pages]detect.ClippedEdges,
+    /// For each page, true when the page is not white paper.
+    colored: [detect.max_pages]bool,
 };
 
 const max_pass_donors = 24;
@@ -383,6 +385,7 @@ pub const Job = struct {
             .frame = image.FrameView.fromPacked(data, upright_size.width, upright_size.height, self.colorimetry),
             .quads = frame.held.quads,
             .clipped_edges = frame.held.clipped_edges,
+            .colored = frame.held.colored,
         };
     }
 };
@@ -728,11 +731,12 @@ pub const Stream = struct {
         const bytes = image.packedFrameSize(self.options.source_size.width, self.options.source_size.height);
         const data = self.spare.pop() orelse try self.gpa.alloc(u8, bytes);
         intake.copy(data, frame);
-        var held: HeldFrame = .{ .index = index, .data = data, .quads = undefined, .clipped_edges = undefined };
+        var held: HeldFrame = .{ .index = index, .data = data, .quads = undefined, .clipped_edges = undefined, .colored = undefined };
         const scale: f32 = @floatFromInt(self.factor);
-        for (&held.quads, &held.clipped_edges, &observation.pages) |*quad, *edges, *page| {
+        for (&held.quads, &held.clipped_edges, &held.colored, &observation.pages) |*quad, *edges, *colored, *page| {
             quad.* = scaleQuad(page.quad, scale);
             edges.* = page.clipped_edges;
+            colored.* = page.colored;
         }
         self.held_frames += 1;
         self.stats.peak_held_frames = @max(self.stats.peak_held_frames, self.held_frames);
@@ -1123,6 +1127,7 @@ pub const Stream = struct {
                     .frame = image.FrameView.fromPacked(data, self.upright_size.width, self.upright_size.height, self.options.colorimetry),
                     .quads = first_choice.quads,
                     .clipped_edges = first_choice.clipped_edges,
+                    .colored = first_choice.colored,
                 },
                 spread.segment.kind,
                 page_size,

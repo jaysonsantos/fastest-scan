@@ -58,6 +58,10 @@ pub const PageObservation = struct {
     covered: CellSet,
     /// The sides of the page that end at the border of the frame.
     clipped_edges: detect.ClippedEdges,
+    /// True when the page is not white paper: a coloured page, or the flap of a
+    /// cover. The paper score says nothing about such a page, so `covered` has
+    /// only the cells outside the frame: a hand on the page is not seen.
+    colored: bool = false,
     /// The darkest luma of each ink cell. Thin text is as dark here as a picture, so
     /// this map shows where glare washed out the ink.
     ink: [ink_cells]u8,
@@ -131,13 +135,13 @@ pub fn observeLayout(scene: *const detect.Scene, layout: detect.Layout) FrameObs
         .pages = undefined,
     };
     for (0..layout.pageCount()) |index| {
-        observation.pages[index] = observePage(scene, layout.pages[index], layout.clipped_edges[index]) orelse return FrameObservation.none;
+        observation.pages[index] = observePage(scene, layout.pages[index], layout.clipped_edges[index], layout.colored[index]) orelse return FrameObservation.none;
     }
     if (layout.kind == .single) observation.pages[1] = observation.pages[0];
     return observation;
 }
 
-fn observePage(scene: *const detect.Scene, quad: Quad, clipped_edges: detect.ClippedEdges) ?PageObservation {
+fn observePage(scene: *const detect.Scene, quad: Quad, clipped_edges: detect.ClippedEdges, colored: bool) ?PageObservation {
     // From grid coordinates (0..grid_width, 0..grid_height) to the half-size image.
     const to_scene = Homography.fromQuads(
         Quad.rect(grid_width, grid_height),
@@ -151,6 +155,7 @@ fn observePage(scene: *const detect.Scene, quad: Quad, clipped_edges: detect.Cli
         .thumbnail = undefined,
         .covered = CellSet.empty,
         .clipped_edges = clipped_edges,
+        .colored = colored,
         .ink = undefined,
         .paper_luma = 255,
     };
@@ -182,7 +187,8 @@ fn observePage(scene: *const detect.Scene, quad: Quad, clipped_edges: detect.Cli
             if (score_sum / sample_count > @as(f32, @floatFromInt(scene.threshold))) paper.set(index);
         }
     }
-    page.covered = coveredCells(paper);
+    // No cell of a coloured page has the score of paper.
+    if (!colored) page.covered = coveredCells(paper);
     page.covered.setUnion(outside);
 
     // The ink map: the darkest sample of each small cell.
@@ -497,6 +503,56 @@ test "page similarity needs common free cells" {
     var b = testPage(1);
     b.covered = CellSet.full;
     try testing.expect(pageSimilarity(&a, &b) == null);
+}
+
+test "a page that is not white paper has no covered cells" {
+    // A dark desk with an open book: the left half has the colour of an orange,
+    // and the right half is white paper.
+    const width = 320;
+    const height = 240;
+    const chroma_width = width / 2;
+    const chroma_size = chroma_width * (height / 2);
+    const buffer = try testing.allocator.alloc(u8, image.packedFrameSize(width, height));
+    defer testing.allocator.free(buffer);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const on_book = y >= 30 and y < 210 and x >= 40 and x < 280;
+            buffer[y * width + x] = if (!on_book) 70 else if (x < 160) 150 else 200;
+        }
+    }
+    for (0..height / 2) |y| {
+        for (0..chroma_width) |x| {
+            const on_left = y >= 15 and y < 105 and x >= 20 and x < 80;
+            buffer[width * height + y * chroma_width + x] = if (on_left) 90 else 128;
+            buffer[width * height + chroma_size + y * chroma_width + x] = if (on_left) 170 else 128;
+        }
+    }
+    const frame = image.FrameView.fromPacked(buffer, width, height, .{});
+    const scene = (try detect.analyzeScene(testing.allocator, frame, .{})).?;
+    defer scene.deinit(testing.allocator);
+
+    const left: Quad = .{ .tl = Point.init(40, 30), .tr = Point.init(160, 30), .br = Point.init(160, 210), .bl = Point.init(40, 210) };
+    const right: Quad = .{ .tl = Point.init(160, 30), .tr = Point.init(280, 30), .br = Point.init(280, 210), .bl = Point.init(160, 210) };
+    var layout: detect.Layout = .{
+        .kind = .spread,
+        .pages = .{ left, right },
+        .clipped_edges = @splat(.none),
+        .outlines = @splat(null),
+        .clipped = false,
+        .gutter_response = 10,
+        .edge_support = 1,
+    };
+
+    // As paper, the left page is covered: no cell has the score of paper.
+    const as_paper = observeLayout(&scene, layout);
+    try testing.expect(as_paper.pages[0].coveredFraction() > 0.9);
+
+    layout.colored = .{ true, false };
+    const observation = observeLayout(&scene, layout);
+    try testing.expect(observation.pages[0].colored);
+    try testing.expect(!observation.pages[1].colored);
+    try testing.expectEqual(@as(usize, 0), observation.pages[0].covered.count());
+    try testing.expect(observation.coveredFraction() < 0.05);
 }
 
 test "the observation of a frame frees its memory when an allocation fails" {

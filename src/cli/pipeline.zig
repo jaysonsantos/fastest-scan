@@ -439,6 +439,8 @@ pub const RenderedDocument = struct {
     donors_used: usize,
     /// The number of pages that were rendered with the curved page map.
     curled_pages: usize,
+    /// The number of pages that are not white paper: they keep their colours.
+    colored_pages: usize,
     /// Mean fractions of the page area, over all pages.
     glare: f32,
     cover: f32,
@@ -644,9 +646,10 @@ const FrameStore = struct {
             .quads = undefined,
             .clipped_edges = undefined,
         };
-        for (&result.quads, &result.clipped_edges, 0..) |*quad, *edges, index| {
+        for (&result.quads, &result.clipped_edges, &result.colored, 0..) |*quad, *edges, *colored, index| {
             quad.* = scaleQuad(observation.pages[index].quad, scale);
             edges.* = observation.pages[index].clipped_edges;
+            colored.* = observation.pages[index].colored;
         }
         return result;
     }
@@ -733,6 +736,7 @@ const SpreadPlan = struct {
 
 const PageReport = struct {
     curled: bool = false,
+    colored: bool = false,
     donor_frames: u8 = 0,
     donors_used: u8 = 0,
     fusion: fastscan.fuse.Stats = .{},
@@ -886,6 +890,7 @@ const RenderContext = struct {
             result.pages[page_index] = encoded;
             result.reports[page_index] = .{
                 .curled = page.curled,
+                .colored = page.colored,
                 .donor_frames = @intCast(donor_count),
                 .donors_used = page.donors_used,
                 .fusion = page.fusion,
@@ -1100,6 +1105,7 @@ pub fn renderDocument(
         .duplicate_spreads = candidates.items.len - plans.len,
         .donors_used = 0,
         .curled_pages = 0,
+        .colored_pages = 0,
         .glare = 0,
         .cover = 0,
         .outside = 0,
@@ -1126,6 +1132,7 @@ pub fn renderDocument(
             maybe_page.* = null;
             document.donors_used += report.donors_used;
             if (report.curled) document.curled_pages += 1;
+            if (report.colored) document.colored_pages += 1;
             document.glare += report.fusion.glare;
             document.cover += report.fusion.cover;
             document.outside += report.fusion.outside;

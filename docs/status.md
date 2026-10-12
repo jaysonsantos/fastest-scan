@@ -81,6 +81,7 @@ finger is lost: `--fingers blank` and `--fingers keep` change the rule.
 | `detect.zig`: paper mask, edge lines, fold of a spread, page quads, clipped edges | Works on stable frames of the benchmark. Tests use synthetic frames. |
 | `detect.zig`: the outline search for a book on a surface as bright as its pages (decisions 0024 and 0027) | Works on one phone video of a bright room: the pages of the PDF are pages of the book, on the desktop and in the app on the phone. The benchmark keeps the same bytes. The search accepts a region only when another surface lies around it, so a block of text on a page is not the paper. Not for a page that runs out of the frame. |
 | `lines.zig`, and the line search of `detect.zig`: a page on a bright desk by its four straight edges (decision 0026) | Works on one recording of a white desk with a wood grain and things around the book: the detector finds the page in all its frames. 12 other videos keep the same bytes of the PDF. Not for a page that runs out of the frame, and not for white paper on a desk of the same white. |
+| A page that is not white paper: a coloured page, or the flap of a cover (decision 0028) | Works on the same recording: the left half of the open book, orange and pink, is the first of 2 pages, with its colours. Only as the second page next to a page of white paper, and only with the line search. Such a page comes from one frame: no donor frame repairs it, and a hand on it is not seen. |
 | `observe.zig`: page thumbnail, covered cells, frame similarity | Done, tested |
 | `timeline.zig`: stable runs of frames, one reference frame per spread | Works, but splits some spreads in two |
 | `document.zig`: one page size for all pages | Done, tested |
@@ -234,6 +235,10 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
   book is inside the frame, the detector changes between the whole book and
   one page from frame to frame, which gives too many views (decision 0027,
   "Limits").
+- **A coloured page on a dark desk is not in the result.** Only the line
+  search finds a page that is not white paper, and it runs only when the
+  surface around the book is bright (decision 0028). On a dark desk the white
+  page alone is the paper, as before.
 - **White paper in a shadow on a white desk in the light.** The outline search
   wants another colour around its region, or a surface that is darker than the
   paper (decision 0027). Such a sheet has neither, and the detector takes the

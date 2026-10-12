@@ -387,6 +387,41 @@ pub fn flatten(allocator: Allocator, page: RgbF32, options: Options) Allocator.E
 /// The three channels of a pixel, for arithmetic on all of them at a time.
 const Color = @Vector(channels, f32);
 
+/// The mean colour of the blank paper of a warped page: the colour of the light
+/// on the page, when the paper is white.
+pub fn paperColor(allocator: Allocator, page: RgbF32, options: Options) Allocator.Error![channels]f32 {
+    var mean: [channels]f32 = @splat(1);
+    if (page.width == 0 or page.height == 0) return mean;
+    const background = try estimateBackground(allocator, page, options);
+    defer background.deinit(allocator);
+    var sum: [channels]f64 = @splat(0);
+    const cell_count = background.grid_width * background.grid_height;
+    for (0..cell_count) |index| {
+        for (0..channels) |channel| sum[channel] += background.cells[index * channels + channel];
+    }
+    for (&mean, sum) |*value, total| value.* = @floatCast(total / @as(f64, @floatFromInt(cell_count)));
+    return mean;
+}
+
+/// Divide a warped page by one paper colour, in place: the step that takes the
+/// place of `flatten` for a page that is not white paper. Such a page has no
+/// blank paper that shows the light, so the caller gives the paper colour of
+/// the white page next to it. The colours of the page stay: each pixel gets the
+/// same factor.
+pub fn balance(page: RgbF32, paper: [channels]f32, options: Options) void {
+    if (!options.flatten) return;
+    const lowest: Color = @splat(min_background);
+    const min_gain: Color = @splat(options.min_gain);
+    const max_gain: Color = @splat(options.max_gain);
+    const one: Color = @splat(1.0);
+    const gain = @min(@max(one / @max(@as(Color, paper), lowest), min_gain), max_gain);
+    const pixel_count = @as(usize, page.width) * page.height;
+    for (0..pixel_count) |index| {
+        const pixel = page.data[index * channels ..][0..channels];
+        pixel.* = @as(Color, pixel.*) * gain;
+    }
+}
+
 /// Sharpen a flattened page and set its black and white levels, in place.
 pub fn finish(allocator: Allocator, page: RgbF32, options: Options) Allocator.Error!void {
     if (page.width == 0 or page.height == 0) return;
@@ -479,6 +514,41 @@ test "a blank page stays blank" {
     for (page.data) |*value| value.* = 0.6;
     try enhance(testing.allocator, page, .{});
     for (page.data) |value| try testing.expect(value > 0.98);
+}
+
+test "the paper colour of a page is the mean colour of its blank paper" {
+    const page = try testPage(testing.allocator);
+    defer page.deinit(testing.allocator);
+    const paper = try paperColor(testing.allocator, page, .{});
+    // The shade of the paper goes from 0.75 to 0.5 across the page.
+    const mean_shade = 0.625;
+    try testing.expectApproxEqAbs(@as(f32, mean_shade), paper[0], 0.02);
+    try testing.expectApproxEqAbs(@as(f32, mean_shade * 0.93), paper[1], 0.02);
+    try testing.expectApproxEqAbs(@as(f32, mean_shade * 0.85), paper[2], 0.02);
+}
+
+test "the balance takes the light off a coloured page and keeps its colours" {
+    // A page with the colour of an orange under a warm light.
+    const light = [channels]f32{ 0.8, 0.7, 0.6 };
+    const surface = [channels]f32{ 0.9, 0.5, 0.2 };
+    const page = try RgbF32.init(testing.allocator, 16, 16);
+    defer page.deinit(testing.allocator);
+    for (0..page.height) |y| {
+        for (0..page.width) |x| {
+            for (page.pixel(x, y), surface, light) |*value, colour, lamp| value.* = colour * lamp;
+        }
+    }
+    balance(page, light, .{});
+    for (0..page.height) |y| {
+        for (0..page.width) |x| {
+            for (page.pixel(x, y), surface) |value, colour| try testing.expectApproxEqAbs(colour, value, 1e-4);
+        }
+    }
+
+    // `flatten` takes the colour of the page for the colour of its paper.
+    try flatten(testing.allocator, page, .{});
+    const flat = page.pixel(8, 8);
+    try testing.expect(flat[1] > 0.95);
 }
 
 test "grey test" {

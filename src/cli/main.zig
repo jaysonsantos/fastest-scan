@@ -129,6 +129,9 @@ fn run(init: std.process.Init, config: *const args.Config, stdout: *Io.Writer) !
             document.curled_pages,
             render_ms - analysis_ms,
         });
+        if (document.colored_pages > 0) {
+            std.debug.print("colour: pages that are not white paper: {d}; each one comes from one frame, with its colours\n", .{document.colored_pages});
+        }
         std.debug.print("fusion: {d} donor pages registered; mean page area with glare {d:.2} %, covered {d:.2} %, outside the frame {d:.2} %, not repaired {d:.2} % (no donor agreed: {d:.2} %)\n", .{
             document.donors_used,
             document.glare * percent,
