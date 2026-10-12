@@ -257,9 +257,9 @@ test "a document with two pages has a correct cross-reference table" {
     const bytes = memory.bytes.items;
     try testing.expect(std.mem.startsWith(u8, bytes, "%PDF-1.7\n"));
     try testing.expect(std.mem.endsWith(u8, bytes, "%%EOF\n"));
-    try testing.expect(std.mem.indexOf(u8, bytes, "/Count 2") != null);
-    try testing.expect(std.mem.indexOf(u8, bytes, "/MediaBox [0 0 288.000 432.000]") != null);
-    try testing.expect(std.mem.indexOf(u8, bytes, "/Title (A \\(test\\) title)") != null);
+    try testing.expect(std.mem.find(u8, bytes, "/Count 2") != null);
+    try testing.expect(std.mem.find(u8, bytes, "/MediaBox [0 0 288.000 432.000]") != null);
+    try testing.expect(std.mem.find(u8, bytes, "/Title (A \\(test\\) title)") != null);
 
     // Every offset of the table points at the start of its object.
     const object_count = object.first_page + 2 * object.per_page;
@@ -272,9 +272,9 @@ test "a document with two pages has a correct cross-reference table" {
 
     // The `startxref` value points at the table.
     const marker = "startxref\n";
-    const marker_position = std.mem.lastIndexOf(u8, bytes, marker).?;
+    const marker_position = std.mem.findLast(u8, bytes, marker).?;
     const number_start = marker_position + marker.len;
-    const number_end = std.mem.indexOfScalarPos(u8, bytes, number_start, '\n').?;
+    const number_end = std.mem.findScalarPos(u8, bytes, number_start, '\n').?;
     const xref_position = try std.fmt.parseInt(usize, bytes[number_start..number_end], 10);
     try testing.expect(std.mem.startsWith(u8, bytes[xref_position..], "xref\n"));
 }

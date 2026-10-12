@@ -169,7 +169,7 @@ fn parseStream(text: []const u8) Error!VideoInfo {
 
     var lines = std.mem.tokenizeAny(u8, text, "\r\n");
     while (lines.next()) |line| {
-        const equals = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        const equals = std.mem.findScalar(u8, line, '=') orelse continue;
         const key = line[0..equals];
         const value = line[equals + 1 ..];
         if (std.mem.eql(u8, key, probe_key.width)) {
@@ -177,7 +177,7 @@ fn parseStream(text: []const u8) Error!VideoInfo {
         } else if (std.mem.eql(u8, key, probe_key.height)) {
             height = std.fmt.parseInt(u32, value, 10) catch null;
         } else if (std.mem.eql(u8, key, probe_key.time_base)) {
-            const slash = std.mem.indexOfScalar(u8, value, '/') orelse continue;
+            const slash = std.mem.findScalar(u8, value, '/') orelse continue;
             numerator = std.fmt.parseInt(u32, value[0..slash], 10) catch null;
             denominator = std.fmt.parseInt(u32, value[slash + 1 ..], 10) catch null;
         } else if (std.mem.eql(u8, key, probe_key.rotation)) {
@@ -211,11 +211,11 @@ fn parsePackets(allocator: Allocator, text: []const u8) ![]FrameEntry {
     errdefer entries.deinit(allocator);
     var lines = std.mem.tokenizeAny(u8, text, "\r\n");
     while (lines.next()) |line| {
-        const comma = std.mem.indexOfScalar(u8, line, ',') orelse continue;
+        const comma = std.mem.findScalar(u8, line, ',') orelse continue;
         // A packet without a time ("N/A") gives no frame that the pipeline can address.
         const pts = std.fmt.parseInt(i64, line[0..comma], 10) catch continue;
         const flags = line[comma + 1 ..];
-        try entries.append(allocator, .{ .pts = pts, .key = std.mem.indexOfScalar(u8, flags, 'K') != null });
+        try entries.append(allocator, .{ .pts = pts, .key = std.mem.findScalar(u8, flags, 'K') != null });
     }
     // The packets come in decode order. The decoder gives the frames in display order.
     std.mem.sort(FrameEntry, entries.items, {}, struct {

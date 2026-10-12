@@ -31,6 +31,8 @@ Read `docs/status.md` first. It says what works, what does not, and what is next
 - Run: `zig build run -- <video> -o out.pdf`, or `zig-out/bin/fastest-scan`.
 - Test: `scripts/test.sh`. One file: `zig test src/lib/geometry.zig`.
 - Lint: `scripts/lint.sh`. One linter: `prek run <hook-id> --all-files`.
+  `scripts/check-deprecated.sh` finds a deprecated name of the Zig standard
+  library; the compiler gives no warning for it.
 - Lint and test: `scripts/all.sh`.
 - Benchmark: `scripts/bench.sh`. It needs the video of `FASTEST_SCAN_BENCH_VIDEO`.
   `BENCH_NO_CACHE=1` runs it with no frame cache: the time that a user gets.
@@ -58,6 +60,13 @@ Read `docs/status.md` first. It says what works, what does not, and what is next
 - The library frees each block that it takes, also from a `scratch` allocator: do
   not rely on an arena. The CLI gives each worker a `memory.BlockCache`, which uses
   a large block again for the next request of the same size (decision 0017).
+- Free a block also when a later step fails: put the `defer` or the `errdefer`
+  directly after the allocation. `fuse.zig` and `render.zig` have a test with
+  `std.testing.checkAllAllocationFailures`, which makes each allocation fail one
+  time. A new entry point of the library gets such a test.
+- Keep the name of an error. Do not change each error into one name, and do not
+  drop an error with `catch {}`: handle the errors that have a meaning (for
+  example `error.FileNotFound` for a cache), and give the others to the caller.
 - Credit every source. Name the paper (authors, title, year) in the comment of the
   algorithm. In the same commit, add it to `docs/references.md` (where it is used)
   and to `docs/references.bib` (the BibTeX entry). The README lists the main

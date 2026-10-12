@@ -21,7 +21,7 @@ pub const grid_width = 32;
 pub const grid_height = 44;
 pub const grid_cells = grid_width * grid_height;
 
-pub const CellSet = std.StaticBitSet(grid_cells);
+pub const CellSet = std.bit_set.Static(grid_cells);
 
 /// Each cell is the mean of this many samples along each axis.
 const samples_per_cell = 2;

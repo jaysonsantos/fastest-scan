@@ -858,7 +858,7 @@ const RenderContext = struct {
         defer gpa.free(donor_sources);
         var donor_count: usize = 0;
         for (frames) |frame_index| {
-            const position = std.mem.indexOfScalar(u32, loaded, frame_index).?;
+            const position = std.mem.findScalar(u32, loaded, frame_index).?;
             const source = store.source(self.analysis, frame_index, buffers[position]);
             if (frame_index == reference_index) {
                 reference = source;

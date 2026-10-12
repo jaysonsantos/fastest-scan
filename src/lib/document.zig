@@ -98,7 +98,6 @@ fn percentile(values: []f32, fraction: f32) f32 {
 // region: tests
 
 const testing = std.testing;
-const detect = @import("detect.zig");
 
 fn testFrame(width: f32, height: f32) observe.FrameObservation {
     var frame: observe.FrameObservation = .{

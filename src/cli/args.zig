@@ -198,7 +198,7 @@ pub fn parse(arguments: []const []const u8, environment: Environment) ParseError
         var inline_value: ?[]const u8 = null;
         if (std.mem.startsWith(u8, argument, "--")) {
             const body = argument[2..];
-            const equals = std.mem.indexOfScalar(u8, body, '=');
+            const equals = std.mem.findScalar(u8, body, '=');
             const name = if (equals) |position| body[0..position] else body;
             if (equals) |position| inline_value = body[position + 1 ..];
             spec = findLong(name) orelse return error.UnknownFlag;
@@ -392,8 +392,8 @@ test "errors" {
 test "help and version" {
     try testing.expect((try parse(&.{"--help"}, Environment.empty)) == .help);
     try testing.expect((try parse(&.{ "in.mp4", "--version" }, Environment.empty)) == .version);
-    try testing.expect(std.mem.indexOf(u8, help_text, "--cache-dir DIR") != null);
-    try testing.expect(std.mem.indexOf(u8, help_text, env.ffmpeg) != null);
+    try testing.expect(std.mem.find(u8, help_text, "--cache-dir DIR") != null);
+    try testing.expect(std.mem.find(u8, help_text, env.ffmpeg) != null);
 }
 
 // endregion: tests

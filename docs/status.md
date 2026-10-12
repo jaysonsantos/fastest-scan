@@ -152,6 +152,22 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
    - Complete C interface (`c_api.zig` has only the version).
 7. `scripts/bench.sh` prints the page count, the time, the size, and OCR numbers.
    Missing: a sharpness number and a glare area number.
+8. **The code against the conventions of the Zig standard library.** A check on
+   2026-10-12 found three gaps, which are closed: memory that stayed when an
+   allocation failed in `fuse.zig` and `render.zig`, errors that the CLI
+   dropped or gave one name, and 15 uses of deprecated std names. What is left,
+   all small:
+   - The standard library puts the allocator before `io` in a parameter list.
+     11 functions of the CLI have the other order (ziglint rule Z023).
+   - One `FrameObservation` has about 14 kB, which is 72 MB for the benchmark
+     video. The two ink maps are most of it, and only the donor choice and the
+     reference choice read them. Measure the timeline step before a change.
+   - Frame, segment, and candidate indexes are all `u32`: the compiler cannot
+     find a mix-up. An `enum(u32)` for each kind can.
+   - No list reserves its capacity, and `pdf.Writer` keeps its allocator.
+   - The test with `checkAllAllocationFailures` covers `fuse.fuse`,
+     `render.renderSpread`, and `render.encodePage`. The other entry points of
+     the library have no such test.
 
 ## Known problems
 

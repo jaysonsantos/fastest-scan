@@ -35,6 +35,7 @@
               pkgs.git-cliff
               # linters, run together by `prek run --all-files` (.pre-commit-config.yaml)
               pkgs.prek
+              pkgs.ziglint
               pkgs.taplo
               pkgs.shellcheck
               pkgs.shfmt

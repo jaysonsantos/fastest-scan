@@ -140,7 +140,8 @@ Still valid: `std.Thread.spawn`, `std.Thread.getCpuCount()`, `std.AutoHashMap`,
 |---|---|---|
 | zig fmt | `zig fmt --check src build.zig build.zig.zon` | The prek hook runs it. |
 | AST check | `zig ast-check <file>` | Finds unused locals. `zig build check` finds more. |
-| ziglint 0.5.3 (`nixpkgs#ziglint`) | `ziglint --ignore Z006 --ignore Z024 src build.zig` | Reports deprecated std API (Z011). Not in the flake yet. |
+| ziglint 0.6.1 (`nixpkgs#ziglint`) | `ziglint --only Z011 --only Z013 --only Z026 src build.zig` | In the flake. The prek hook runs three rules: a deprecated std name (Z011), an import with no use (Z013), an empty catch block (Z026). Z011 finds only a part: on 2026-10-12 it found 3 of 15 uses. The other rules are style choices that the code does not follow, for example `Self` for `@This()` (Z020). |
+| `scripts/check-deprecated.sh` | `scripts/check-deprecated.sh` | The prek hook runs it. It reads the deprecated names from the doc comments of the installed std and finds each use with a full path, for example `std.mem.indexOf`. It does not find a deprecated method of a value. |
 | zlint 0.9.1 (`nixpkgs#zig-zlint`) | `zlint` | Not in the flake yet. |
 
 ## Build times (Zig 0.17.0, on a loaded machine)

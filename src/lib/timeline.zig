@@ -275,7 +275,7 @@ pub const DonorOptions = struct {
     cut_count: u8 = 3,
 };
 
-const InkSet = std.StaticBitSet(detect.max_pages * observe.ink_cells);
+const InkSet = std.bit_set.Static(detect.max_pages * observe.ink_cells);
 
 /// Some pages of a frame, by their index.
 const PageRange = struct {

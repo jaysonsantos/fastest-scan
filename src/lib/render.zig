@@ -11,7 +11,6 @@ const detect = @import("detect.zig");
 const resample = @import("resample.zig");
 const enhance = @import("enhance.zig");
 const jpeg = @import("jpeg.zig");
-const raster = @import("raster.zig");
 const register = @import("register.zig");
 const fuse = @import("fuse.zig");
 const curl = @import("curl.zig");

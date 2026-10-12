@@ -34,6 +34,26 @@ repos:
         pass_filenames: false
         files: \.(zig|zon)$
 
+      # The compiler gives no warning for a deprecated name of the standard
+      # library: the old name is an alias with a doc comment.
+      - id: zig-deprecated
+        name: zig deprecated std names
+        entry: scripts/check-deprecated.sh
+        language: system
+        pass_filenames: false
+        files: \.zig$
+
+      # Three rules of ziglint: a deprecated name (Z011; it finds only a part, and
+      # scripts/check-deprecated.sh finds the names with a full path), an import
+      # with no use (Z013), and an empty catch block (Z026). The other rules are
+      # off: they are style choices that the code does not follow, for example
+      # `Self` for `@This()` (Z020) and the allocator before `Io` (Z023).
+      - id: ziglint
+        name: ziglint
+        entry: ziglint --only Z011 --only Z013 --only Z026
+        language: system
+        files: \.zig$
+
       - id: shellcheck
         name: shellcheck
         entry: shellcheck --external-sources
