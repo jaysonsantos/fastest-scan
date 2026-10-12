@@ -24,6 +24,7 @@ pub const fuse = @import("fuse.zig");
 pub const curl = @import("curl.zig");
 pub const jpeg = @import("jpeg.zig");
 pub const pdf = @import("pdf.zig");
+pub const memory = @import("memory.zig");
 
 /// The version of the library, from `build.zig.zon`.
 pub const version: []const u8 = build_options.version;

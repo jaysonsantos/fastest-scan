@@ -22,3 +22,4 @@ replaces it and name the old file in the new one.
 | [0014](0014-paint-over-fingers.md) | A new finger rule; a finger that stays gets the colour of the paper |
 | [0015](0015-donor-corners-from-the-first-pass.md) | A donor frame takes the page corners of the first pass; the hot loops use vector code |
 | [0016](0016-sharp-donor-in-the-region.md) | A region takes the donor that is sharp in the region |
+| [0017](0017-worker-memory-from-a-block-cache.md) | A worker keeps its large blocks of memory |

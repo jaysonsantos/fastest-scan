@@ -706,16 +706,17 @@ const chroma_table_id = 1;
 
 // region: public encoders
 
-/// Encode an 8-bit grey image. The caller owns the returned bytes.
-pub fn encodeGray(allocator: Allocator, plane: image.PlaneView, options: Options) Error![]u8 {
+/// Encode an 8-bit grey image. The caller owns the returned bytes, which come from
+/// `allocator`. `scratch` gives the working memory: it is free again at the return.
+pub fn encodeGray(allocator: Allocator, scratch: Allocator, plane: image.PlaneView, options: Options) Error![]u8 {
     if (plane.width == 0 or plane.height == 0 or plane.width > max_dimension or plane.height > max_dimension) {
         return error.UnsupportedDimensions;
     }
     const padded_width = roundUp(plane.width, block_side);
     const padded_height = roundUp(plane.height, block_side);
 
-    const samples = try PaddedPlane.init(allocator, padded_width, padded_height);
-    defer samples.deinit(allocator);
+    const samples = try PaddedPlane.init(scratch, padded_width, padded_height);
+    defer samples.deinit(scratch);
     for (0..plane.height) |y| {
         const source = plane.row(y);
         const target = samples.data[y * padded_width ..];
@@ -724,8 +725,8 @@ pub fn encodeGray(allocator: Allocator, plane: image.PlaneView, options: Options
     samples.pad(plane.width, plane.height);
 
     const quant = QuantTable.init(&base_luma_quant, options.quality);
-    const component = try Component.init(allocator, padded_width / block_side, padded_height / block_side);
-    defer component.deinit(allocator);
+    const component = try Component.init(scratch, padded_width / block_side, padded_height / block_side);
+    defer component.deinit(scratch);
     component.transform(samples.data, &quant);
 
     var stats: Statistics = .{};
@@ -753,8 +754,9 @@ pub fn encodeGray(allocator: Allocator, plane: image.PlaneView, options: Options
     return sink.toOwned();
 }
 
-/// Encode an 8-bit sRGB image. The caller owns the returned bytes.
-pub fn encodeRgb(allocator: Allocator, rgb: image.Rgb8, options: Options) Error![]u8 {
+/// Encode an 8-bit sRGB image. The caller owns the returned bytes, which come from
+/// `allocator`. `scratch` gives the working memory: it is free again at the return.
+pub fn encodeRgb(allocator: Allocator, scratch: Allocator, rgb: image.Rgb8, options: Options) Error![]u8 {
     if (rgb.width == 0 or rgb.height == 0 or rgb.width > max_dimension or rgb.height > max_dimension) {
         return error.UnsupportedDimensions;
     }
@@ -766,12 +768,12 @@ pub fn encodeRgb(allocator: Allocator, rgb: image.Rgb8, options: Options) Error!
     const padded_width = roundUp(rgb.width, mcu_side);
     const padded_height = roundUp(rgb.height, mcu_side);
 
-    const luma = try PaddedPlane.init(allocator, padded_width, padded_height);
-    defer luma.deinit(allocator);
-    var cb = try PaddedPlane.init(allocator, padded_width, padded_height);
-    defer cb.deinit(allocator);
-    var cr = try PaddedPlane.init(allocator, padded_width, padded_height);
-    defer cr.deinit(allocator);
+    const luma = try PaddedPlane.init(scratch, padded_width, padded_height);
+    defer luma.deinit(scratch);
+    var cb = try PaddedPlane.init(scratch, padded_width, padded_height);
+    defer cb.deinit(scratch);
+    var cr = try PaddedPlane.init(scratch, padded_width, padded_height);
+    defer cr.deinit(scratch);
 
     for (0..rgb.height) |y| {
         const source = rgb.row(y);
@@ -791,23 +793,23 @@ pub fn encodeRgb(allocator: Allocator, rgb: image.Rgb8, options: Options) Error!
     cr.pad(rgb.width, rgb.height);
 
     if (options.subsampling == .s420) {
-        const cb_half = try cb.halved(allocator);
-        cb.deinit(allocator);
+        const cb_half = try cb.halved(scratch);
+        cb.deinit(scratch);
         cb = cb_half;
-        const cr_half = try cr.halved(allocator);
-        cr.deinit(allocator);
+        const cr_half = try cr.halved(scratch);
+        cr.deinit(scratch);
         cr = cr_half;
     }
 
     const luma_quant = QuantTable.init(&base_luma_quant, options.quality);
     const chroma_quant = QuantTable.init(&base_chroma_quant, options.quality);
 
-    const y_component = try Component.init(allocator, luma.width / block_side, luma.height / block_side);
-    defer y_component.deinit(allocator);
-    const cb_component = try Component.init(allocator, cb.width / block_side, cb.height / block_side);
-    defer cb_component.deinit(allocator);
-    const cr_component = try Component.init(allocator, cr.width / block_side, cr.height / block_side);
-    defer cr_component.deinit(allocator);
+    const y_component = try Component.init(scratch, luma.width / block_side, luma.height / block_side);
+    defer y_component.deinit(scratch);
+    const cb_component = try Component.init(scratch, cb.width / block_side, cb.height / block_side);
+    defer cb_component.deinit(scratch);
+    const cr_component = try Component.init(scratch, cr.width / block_side, cr.height / block_side);
+    defer cr_component.deinit(scratch);
     y_component.transform(luma.data, &luma_quant);
     cb_component.transform(cb.data, &chroma_quant);
     cr_component.transform(cr.data, &chroma_quant);
@@ -982,7 +984,7 @@ test "encoded files start and end with the JPEG markers" {
     for (rgb.data, 0..) |*value, i| value.* = @intCast((i * 7) % 256);
 
     for ([_]Subsampling{ .s444, .s420 }) |subsampling| {
-        const bytes = try encodeRgb(testing.allocator, rgb, .{ .subsampling = subsampling });
+        const bytes = try encodeRgb(testing.allocator, testing.allocator, rgb, .{ .subsampling = subsampling });
         defer testing.allocator.free(bytes);
         try testing.expectEqualSlices(u8, &.{ marker.prefix, marker.soi }, bytes[0..2]);
         try testing.expectEqualSlices(u8, &.{ marker.prefix, marker.eoi }, bytes[bytes.len - 2 ..]);
@@ -991,7 +993,7 @@ test "encoded files start and end with the JPEG markers" {
     var gray = try image.Plane.init(testing.allocator, width, height);
     defer gray.deinit(testing.allocator);
     for (gray.data, 0..) |*value, i| value.* = @intCast((i * 5) % 256);
-    const gray_bytes = try encodeGray(testing.allocator, gray.view(), .{});
+    const gray_bytes = try encodeGray(testing.allocator, testing.allocator, gray.view(), .{});
     defer testing.allocator.free(gray_bytes);
     try testing.expectEqualSlices(u8, &.{ marker.prefix, marker.soi }, gray_bytes[0..2]);
     try testing.expectEqualSlices(u8, &.{ marker.prefix, marker.eoi }, gray_bytes[gray_bytes.len - 2 ..]);
@@ -999,7 +1001,7 @@ test "encoded files start and end with the JPEG markers" {
 
 test "zero-sized images are an error" {
     const empty: image.PlaneView = .{ .data = &.{}, .width = 0, .height = 4, .stride = 0 };
-    try testing.expectError(error.UnsupportedDimensions, encodeGray(testing.allocator, empty, .{}));
+    try testing.expectError(error.UnsupportedDimensions, encodeGray(testing.allocator, testing.allocator, empty, .{}));
 }
 
 // endregion: tests

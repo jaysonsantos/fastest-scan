@@ -17,6 +17,7 @@ const stdout_buffer_bytes = 4096;
 /// One software decoder uses two to three cores.
 const cores_per_decoder = 2;
 const percent = 100.0;
+const bytes_per_megabyte = 1024 * 1024;
 
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
@@ -134,6 +135,11 @@ fn run(init: std.process.Init, config: *const args.Config, stdout: *Io.Writer) !
             document.painted * percent,
             document.finger_left * percent,
             document.finger_pages,
+        });
+        std.debug.print("memory: {d} large blocks from the system, {d} MB; a large block was used again {d} times\n", .{
+            document.memory.fresh_blocks,
+            document.memory.fresh_bytes / bytes_per_megabyte,
+            document.memory.reused_blocks,
         });
     }
 

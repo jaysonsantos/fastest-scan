@@ -12,6 +12,7 @@ const debug = @import("debug.zig");
 
 const image = fastscan.image;
 const observe = fastscan.observe;
+const BlockCache = fastscan.memory.BlockCache;
 const FrameObservation = observe.FrameObservation;
 
 // region: constants
@@ -115,7 +116,7 @@ const AnalysisContext = struct {
     debug_dir: ?Io.Dir,
     frames_done: *std.atomic.Value(usize),
 
-    fn job(self: *const AnalysisContext, range_index: usize) anyerror!void {
+    fn job(self: *const AnalysisContext, _: usize, range_index: usize) anyerror!void {
         const range = self.ranges[range_index];
         const frame_bytes = image.packedFrameSize(self.size.width, self.size.height);
         // One block of memory per job, used again for each frame. An arena on top of the
@@ -434,6 +435,8 @@ pub const RenderedDocument = struct {
     finger_left: f32,
     /// The number of pages with a finger that stays.
     finger_pages: usize,
+    /// The large blocks of working memory of all workers.
+    memory: BlockCache.Stats,
 
     pub fn deinit(self: RenderedDocument, allocator: Allocator) void {
         for (self.pages) |page| page.deinit(allocator);
@@ -570,19 +573,21 @@ const SignatureContext = struct {
     page_size: image.Size,
     options: fastscan.render.Options,
     results: []SignatureResult,
+    /// The working memory of each worker.
+    caches: []BlockCache,
 
-    fn job(self: *const SignatureContext, segment_index: usize) anyerror!void {
+    fn job(self: *const SignatureContext, worker: usize, segment_index: usize) anyerror!void {
         const store = self.store;
         const segment = self.segments[segment_index];
-        const buffer = try store.gpa.alloc(u8, store.frameBytes());
-        defer store.gpa.free(buffer);
+        const memory = self.caches[worker].allocator();
+        const buffer = try memory.alloc(u8, store.frameBytes());
+        defer memory.free(buffer);
         try store.load(&.{segment.reference}, &.{buffer});
 
-        var arena_state: std.heap.ArenaAllocator = .init(store.gpa);
-        defer arena_state.deinit();
+        // The signature stays after the job, so it does not come from the cache.
         const signature = try fastscan.render.renderSignature(
             store.gpa,
-            arena_state.allocator(),
+            memory,
             store.source(self.analysis, segment.reference, buffer),
             segment.kind,
             self.page_size,
@@ -642,10 +647,13 @@ const RenderContext = struct {
     options: fastscan.render.Options,
     donor_options: fastscan.timeline.DonorOptions,
     results: []SpreadResult,
+    /// The working memory of each worker.
+    caches: []BlockCache,
     debug_dir: ?Io.Dir,
 
-    fn job(self: *const RenderContext, plan_index: usize) anyerror!void {
+    fn job(self: *const RenderContext, worker: usize, plan_index: usize) anyerror!void {
         const plan = self.plans[plan_index];
+        const memory = self.caches[worker].allocator();
         const page_count = self.segments[plan.segment].kind.pageCount();
 
         var result: SpreadResult = .{};
@@ -654,19 +662,22 @@ const RenderContext = struct {
         var shared = true;
         for (plan.references[0..page_count]) |reference| shared = shared and reference.frame == plan.references[0].frame;
         if (shared) {
-            try self.renderPages(plan_index, plan.references[0].frame, null, &result);
+            try self.renderPages(memory, plan_index, plan.references[0].frame, null, &result);
         } else {
             for (0..page_count) |page_index| {
-                try self.renderPages(plan_index, plan.references[page_index].frame, page_index, &result);
+                try self.renderPages(memory, plan_index, plan.references[page_index].frame, page_index, &result);
             }
         }
         self.results[plan_index] = result;
     }
 
     /// Render one page of a spread from its reference frame, or all pages when
-    /// `only_page` is null, and put the encoded pages into `result`.
+    /// `only_page` is null, and put the encoded pages into `result`. `memory` gives
+    /// the frames and the working memory; the encoded pages come from the general
+    /// allocator, because they stay after the job.
     fn renderPages(
         self: *const RenderContext,
+        memory: Allocator,
         plan_index: usize,
         reference_index: u32,
         only_page: ?usize,
@@ -697,9 +708,9 @@ const RenderContext = struct {
         const buffers = try gpa.alloc([]u8, frame_count);
         defer gpa.free(buffers);
         var allocated: usize = 0;
-        defer for (buffers[0..allocated]) |buffer| gpa.free(buffer);
+        defer for (buffers[0..allocated]) |buffer| memory.free(buffer);
         for (buffers) |*buffer| {
-            buffer.* = try gpa.alloc(u8, store.frameBytes());
+            buffer.* = try memory.alloc(u8, store.frameBytes());
             allocated += 1;
         }
         try store.load(indexes, buffers);
@@ -718,12 +729,9 @@ const RenderContext = struct {
             }
         }
 
-        var arena_state: std.heap.ArenaAllocator = .init(gpa);
-        defer arena_state.deinit();
-        const scratch = arena_state.allocator();
         const spread = try fastscan.render.renderSpread(
-            gpa,
-            scratch,
+            memory,
+            memory,
             reference,
             donor_sources[0..donor_count],
             segment.kind,
@@ -731,11 +739,11 @@ const RenderContext = struct {
             self.page_size,
             self.options,
         );
-        defer spread.deinit(gpa);
+        defer spread.deinit(memory);
 
         for (spread.pageSlice()) |*page| {
             const page_index: usize = page.index;
-            const encoded = try fastscan.render.encodePage(gpa, scratch, page.rgb, self.options.jpeg);
+            const encoded = try fastscan.render.encodePage(gpa, memory, page.rgb, self.options.jpeg);
             result.pages[page_index] = encoded;
             result.reports[page_index] = .{
                 .curled = page.curled,
@@ -750,19 +758,19 @@ const RenderContext = struct {
                 try dir.writeFile(store.io, .{ .sub_path = name, .data = encoded.jpeg });
                 for (page.layers, 0..) |layer, layer_index| {
                     const layer_name = try std.mem.print(&name_buffer, debug_layers_dir ++ "/p_{d:0>3}_{d}_{d:0>2}.jpg", .{ plan_index, page_index, layer_index });
-                    try debug.writeJpeg(store.io, gpa, dir, layer_name, layer);
+                    try debug.writeJpeg(store.io, memory, dir, layer_name, layer);
                 }
                 if (page.faults) |*faults| {
                     // The picture of the page is done, so the tints can go onto it.
-                    const cover = try fastscan.image.Rgb8.init(gpa, page.rgb.width, page.rgb.height);
-                    defer cover.deinit(gpa);
+                    const cover = try fastscan.image.Rgb8.init(memory, page.rgb.width, page.rgb.height);
+                    defer cover.deinit(memory);
                     @memcpy(cover.data, page.rgb.data);
                     debug.drawCover(cover, faults);
                     const cover_name = try std.mem.print(&name_buffer, debug_cover_dir ++ "/p_{d:0>3}_{d}.jpg", .{ plan_index, page_index });
-                    try debug.writeJpeg(store.io, gpa, dir, cover_name, cover);
+                    try debug.writeJpeg(store.io, memory, dir, cover_name, cover);
                     debug.drawFaults(page.rgb, faults);
                     const faults_name = try std.mem.print(&name_buffer, debug_faults_dir ++ "/p_{d:0>3}_{d}.jpg", .{ plan_index, page_index });
-                    try debug.writeJpeg(store.io, gpa, dir, faults_name, page.rgb);
+                    try debug.writeJpeg(store.io, memory, dir, faults_name, page.rgb);
                 }
             }
         }
@@ -799,6 +807,11 @@ pub fn renderDocument(
     }
 
     const store: FrameStore = .{ .io = io, .gpa = gpa, .config = config, .info = info, .cache_dir = cache_dir };
+    // Each worker keeps its large blocks from one job to the next one.
+    const caches = try gpa.alloc(BlockCache, @max(1, worker_count));
+    defer gpa.free(caches);
+    for (caches) |*cache| cache.* = .init(gpa);
+    defer for (caches) |*cache| cache.deinit();
     const options: fastscan.render.Options = .{
         .detect = .{ .layout = config.layout },
         .jpeg = .{ .quality = config.quality, .dpi = config.dpi },
@@ -820,6 +833,7 @@ pub fn renderDocument(
         .page_size = page_geometry.size,
         .options = options,
         .results = signature_results,
+        .caches = caches,
     };
     try parallel.forEach(io, worker_count, segments.len, &signature_context, SignatureContext.job);
 
@@ -925,6 +939,7 @@ pub fn renderDocument(
         .options = options,
         .donor_options = .{ .count = config.fusion_frames, .page_aspect = page_geometry.aspect },
         .results = results,
+        .caches = caches,
         .debug_dir = debug_dir,
     };
     try parallel.forEach(io, worker_count, plans.len, &render_context, RenderContext.job);
@@ -949,7 +964,9 @@ pub fn renderDocument(
         .painted = 0,
         .finger_left = 0,
         .finger_pages = 0,
+        .memory = .{},
     };
+    for (caches) |*cache| document.memory.add(cache.stats);
     var pages: std.ArrayList(fastscan.render.EncodedPage) = .empty;
     errdefer {
         for (pages.items) |page| page.deinit(gpa);

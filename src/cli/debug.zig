@@ -159,7 +159,7 @@ const fault_tint_weight = 45;
 const fault_tint_scale = 100;
 
 pub fn writeJpeg(io: Io, allocator: Allocator, dir: Io.Dir, name: []const u8, rgb: image.Rgb8) !void {
-    const bytes = try fastscan.jpeg.encodeRgb(allocator, rgb, .{ .quality = jpeg_quality, .subsampling = .s420 });
+    const bytes = try fastscan.jpeg.encodeRgb(allocator, allocator, rgb, .{ .quality = jpeg_quality, .subsampling = .s420 });
     defer allocator.free(bytes);
     try dir.writeFile(io, .{ .sub_path = name, .data = bytes });
 }

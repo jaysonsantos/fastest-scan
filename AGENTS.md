@@ -54,6 +54,9 @@ Read `docs/status.md` first. It says what works, what does not, and what is next
 - The library must not import `std.Io`, `std.fs`, `std.process`, or `std.Thread`.
   The caller gives frames and receives bytes. Threads belong to the caller.
 - The library has no C dependency.
+- The library frees each block that it takes, also from a `scratch` allocator: do
+  not rely on an arena. The CLI gives each worker a `memory.BlockCache`, which uses
+  a large block again for the next request of the same size (decision 0017).
 - Credit every source. Name the paper (authors, title, year) in the comment of the
   algorithm. In the same commit, add it to `docs/references.md` (where it is used)
   and to `docs/references.bib` (the BibTeX entry). The README lists the main

@@ -310,8 +310,9 @@ pub fn renderSignature(
 /// can come from different reference frames. Each rendered page has its index in
 /// `PageImage.index`.
 ///
-/// `allocator` owns the returned images; `scratch` holds the working memory and can
-/// be an arena that the caller frees after the call.
+/// `allocator` owns the returned images. `scratch` gives the working memory: all of
+/// it is free again at the return. A caller that renders many spreads gives a
+/// `memory.BlockCache` for the two, which keeps the large blocks for the next call.
 pub fn renderSpread(
     allocator: Allocator,
     scratch: Allocator,
@@ -482,14 +483,14 @@ pub fn encodePage(allocator: Allocator, scratch: Allocator, page: image.Rgb8, op
             value.* = @intFromFloat(std.math.clamp(luma + 0.5, 0, 255));
         }
         return .{
-            .jpeg = try jpeg.encodeGray(allocator, gray.view(), options),
+            .jpeg = try jpeg.encodeGray(allocator, scratch, gray.view(), options),
             .width = page.width,
             .height = page.height,
             .gray = true,
         };
     }
     return .{
-        .jpeg = try jpeg.encodeRgb(allocator, page, options),
+        .jpeg = try jpeg.encodeRgb(allocator, scratch, page, options),
         .width = page.width,
         .height = page.height,
         .gray = false,
