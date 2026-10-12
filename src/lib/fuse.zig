@@ -336,6 +336,11 @@ const frames_for_second_darkest = 4;
 /// map of what happened in each cell; the caller frees it with `allocator`.
 pub fn fuse(allocator: Allocator, layers: []const Layer, options: Options, fault_map: ?*?FaultMap) Allocator.Error!Stats {
     if (fault_map) |out| out.* = null;
+    // With an error, the caller gets no map.
+    errdefer if (fault_map) |out| {
+        if (out.*) |map| map.deinit(allocator);
+        out.* = null;
+    };
     if (layers.len == 0 or layers.len > max_layers) return .{};
     const reference = layers[0];
     const page = reference.page;
@@ -347,12 +352,18 @@ pub fn fuse(allocator: Allocator, layers: []const Layer, options: Options, fault
     // One pass over each layer gives its cell values and its fingers. A layer gives
     // no data where it shows a finger.
     const finger_grid: finger.Grid = .{ .width = grid_width, .height = grid_height, .cell = cell };
-    var grid: CellGrid = .{ .width = grid_width, .height = grid_height, .luma = try allocator.alloc([]f32, layers.len) };
+    const ink_planes = try allocator.alloc([]f32, layers.len);
+    defer allocator.free(ink_planes);
+    var grid: CellGrid = .{ .width = grid_width, .height = grid_height, .luma = ink_planes };
     // The mean luma and the tint of each cell, for each layer.
     const means = try allocator.alloc([]f32, layers.len);
+    defer allocator.free(means);
     const tints = try allocator.alloc([]f32, layers.len);
+    defer allocator.free(tints);
     const masks = try allocator.alloc(finger.Mask, layers.len);
+    defer allocator.free(masks);
     const covered = try allocator.alloc([]const bool, layers.len);
+    defer allocator.free(covered);
     var built: usize = 0;
     var masks_built: usize = 0;
     defer {
@@ -362,11 +373,6 @@ pub fn fuse(allocator: Allocator, layers: []const Layer, options: Options, fault
             allocator.free(tint_plane);
         }
         for (masks[0..masks_built]) |mask| mask.deinit(allocator);
-        allocator.free(grid.luma);
-        allocator.free(means);
-        allocator.free(tints);
-        allocator.free(masks);
-        allocator.free(covered);
     }
     {
         const no_data = try allocator.alloc(bool, cell_count);
@@ -1596,6 +1602,33 @@ test "a dark bar with a warm tint that the donors show too is not a finger" {
     const stats = try fuse(testing.allocator, &layers, test_options, null);
     try testing.expectEqual(@as(f32, 0), stats.cover);
     try testing.expectEqualSlices(f32, before, pages[0].data);
+}
+
+test "the fusion frees its memory when an allocation fails" {
+    var pages: [4]RgbF32 = undefined;
+    for (&pages) |*page| page.* = try testPage(testing.allocator);
+    defer for (pages) |page| page.deinit(testing.allocator);
+    // Each kind of work: glare on the bar of the reference, a finger on the
+    // reference only, and a finger in all frames.
+    fillGlare(pages[0], 40, 80, 60, 100);
+    fillFinger(pages[0], 16, 72, 144, 200);
+    for (pages) |page| fillFinger(page, 96, 152, 152, 200);
+
+    const Run = struct {
+        fn run(allocator: Allocator, frames: []const RgbF32) !void {
+            // The fusion changes the reference page, so each run gets a copy.
+            const reference = try RgbF32.init(allocator, frames[0].width, frames[0].height);
+            defer reference.deinit(allocator);
+            @memcpy(reference.data, frames[0].data);
+            const layers = [_]Layer{ .{ .page = reference }, .{ .page = frames[1] }, .{ .page = frames[2] }, .{ .page = frames[3] } };
+            var map: ?FaultMap = null;
+            defer if (map) |found| found.deinit(allocator);
+            const stats = try fuse(allocator, &layers, test_options, &map);
+            // The run does the work of each kind, so each allocation has its turn.
+            try testing.expect(stats.glare > 0 and stats.cover > 0 and stats.painted > 0);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Run.run, .{@as([]const RgbF32, &pages)});
 }
 
 // endregion: tests

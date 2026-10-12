@@ -378,15 +378,13 @@ pub fn renderSpread(
         errdefer freeLayerPictures(allocator, pictures);
 
         var scratch_faults: ?fuse.FaultMap = null;
+        defer if (scratch_faults) |found| found.deinit(scratch);
         const stats = try fuse.fuse(scratch, layers.items, options.fuse, if (options.fault_maps) &scratch_faults else null);
         try enhance.finish(scratch, page, options.enhance);
 
-        // The map goes to the caller, so it moves out of the working memory.
+        // The map goes to the caller, so a copy moves out of the working memory.
         var faults: ?fuse.FaultMap = null;
-        if (scratch_faults) |found| {
-            faults = try found.clone(allocator);
-            found.deinit(scratch);
-        }
+        if (scratch_faults) |found| faults = try found.clone(allocator);
         errdefer if (faults) |kept| kept.deinit(allocator);
         const rgb = try enhance.toRgb8(allocator, page);
         errdefer rgb.deinit(allocator);
@@ -717,6 +715,45 @@ test "donor frames repair glare on the reference frame" {
     try testing.expect(fused.pages[0].rgb.pixel(x, y)[1] < 90);
     // A point of the bar outside the glare stays dark.
     try testing.expect(fused.pages[0].rgb.pixel(110, 85)[1] < 90);
+}
+
+test "the page render frees its memory when an allocation fails" {
+    // The reference has glare on the bar, and one donor frame shows the bar.
+    const glare: Quad = .{
+        .tl = geometry.Point.init(100, 90),
+        .tr = geometry.Point.init(160, 90),
+        .br = geometry.Point.init(160, 140),
+        .bl = geometry.Point.init(100, 140),
+    };
+    const shift = geometry.Point.init(4, 2);
+    const donor_page: Quad = .{ .tl = test_page.tl.add(shift), .tr = test_page.tr.add(shift), .br = test_page.br.add(shift), .bl = test_page.bl.add(shift) };
+    const reference_buffer = try testFrame(testing.allocator, test_page, glare);
+    defer testing.allocator.free(reference_buffer);
+    const donor_buffer = try testFrame(testing.allocator, donor_page, null);
+    defer testing.allocator.free(donor_buffer);
+    const donors = [_]SourceFrame{testSource(donor_buffer, donor_page)};
+
+    const Run = struct {
+        fn run(allocator: Allocator, reference: SourceFrame, donor_frames: []const SourceFrame) !void {
+            // The debug outputs are on, so their allocations have their turn too.
+            const options: Options = .{
+                .register = .{ .tile = 16, .max_levels = 2 },
+                .fuse = .{ .cell = 4 },
+                .fault_maps = true,
+                .layer_pictures = true,
+            };
+            const spread = try renderSpread(allocator, allocator, reference, donor_frames, .single, null, test_size, options);
+            defer spread.deinit(allocator);
+            try testing.expectEqual(@as(u8, 1), spread.pages[0].donors_used);
+            const encoded = try encodePage(allocator, allocator, spread.pages[0].rgb, .{});
+            encoded.deinit(allocator);
+        }
+    };
+    try testing.checkAllAllocationFailures(
+        testing.allocator,
+        Run.run,
+        .{ testSource(reference_buffer, test_page), @as([]const SourceFrame, &donors) },
+    );
 }
 
 // endregion: tests
