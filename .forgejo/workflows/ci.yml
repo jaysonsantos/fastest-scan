@@ -12,37 +12,44 @@ concurrency:
 permissions:
   contents: read
 
+# The jobs run on the host of the runner, not in a container: `cachyos-nix` is a host
+# label, and .github/actionlint.yaml lists it. A job assumes three tools of the host
+# only: `nix` for the dev shell, and `git` and `node` for the checkout action. All
+# other tools come from flake.nix. So CI and a developer use the same versions, and
+# the nix store of the host keeps the tools between runs.
+#
+# A host job runs with the rights of the user of the runner. Read the code of a pull
+# request from another person before you let its jobs run.
+env:
+  NIX_CONFIG: experimental-features = nix-command flakes
+
 # CI has no benchmark video. It lints, runs the unit tests, and builds the release binary.
-# The label `docker` is the label of the Forgejo runner; .github/actionlint.yaml lists it.
 jobs:
   lint:
-    runs-on: docker
-    container: nixos/nix:latest
+    runs-on: cachyos-nix
     steps:
       - uses: actions/checkout@v4
       - name: Lint
-        run: nix --extra-experimental-features "nix-command flakes" develop --command scripts/lint.sh
+        run: nix develop --command scripts/lint.sh
 
   test:
-    runs-on: docker
-    container: nixos/nix:latest
+    runs-on: cachyos-nix
     steps:
       - uses: actions/checkout@v4
       - name: Test
-        run: nix --extra-experimental-features "nix-command flakes" develop --command scripts/test.sh
+        run: nix develop --command scripts/test.sh
 
   build:
-    runs-on: docker
-    container: nixos/nix:latest
+    runs-on: cachyos-nix
     steps:
       - uses: actions/checkout@v4
       - name: Build
-        run: nix --extra-experimental-features "nix-command flakes" develop --command scripts/build.sh
+        run: nix develop --command scripts/build.sh
 
   check:
     if: always()
     needs: [lint, test, build]
-    runs-on: docker
+    runs-on: cachyos-nix
     steps:
       - name: Check the result of every job
         env:

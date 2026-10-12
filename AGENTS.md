@@ -21,7 +21,7 @@ Read `docs/status.md` first. It says what works, what does not, and what is next
 | `docs/benchmark-log.md` | One row per benchmark run: page count, time, size, OCR numbers. |
 | `docs/references.md`, `docs/references.bib` | The credits: every paper, standard, and program that the code uses, as a table and as BibTeX. |
 | `prototypes/` | Python experiments that came before a part of the Zig code. A record, not product code. No linter checks it. |
-| `.forgejo/workflows/` | CI for the Forgejo host. `.github/actionlint.yaml` holds only the actionlint config. |
+| `.forgejo/workflows/` | CI for the Forgejo host. The jobs run on the host of the runner (label `cachyos-nix`), not in a container. `.github/actionlint.yaml` holds only the actionlint config. |
 
 ## Commands
 
@@ -69,6 +69,9 @@ Read `docs/status.md` first. It says what works, what does not, and what is next
 - Write the docs, the commit bodies, and this file in Simplified Technical English.
 - Commit messages follow Conventional Commits.
 - When a decision changes, add a file in `docs/decisions/`. Do not rewrite an old one.
+- A CI job assumes three tools of the runner host only: `nix`, `git`, and `node` (for
+  the checkout action). Take each other tool from `flake.nix` with
+  `nix develop --command`. Do not call a tool of the host in a workflow.
 
 ## Facts that surprise
 

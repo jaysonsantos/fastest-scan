@@ -162,5 +162,4 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
 
 ## Open questions
 
-- The Forgejo runner label in `.forgejo/workflows/ci.yml` is `docker`. Confirm that
-  the host has a runner with that label.
+None.

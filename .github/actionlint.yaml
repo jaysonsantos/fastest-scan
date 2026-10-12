@@ -1,4 +1,4 @@
 # actionlint reads its config only from .github/. The workflows live in .forgejo/workflows/.
 self-hosted-runner:
-  # Label of the Forgejo runner that runs jobs in containers.
-  labels: [docker]
+  # Label of the Forgejo runner that runs jobs on its host, which has nix.
+  labels: [cachyos-nix]
