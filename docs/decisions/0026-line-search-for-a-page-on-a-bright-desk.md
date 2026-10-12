@@ -158,8 +158,10 @@ All runs on 2026-10-12, on the desktop.
   2160 pixels from the camera) shows the same scene: the outline is on the page
   of the book, and it turns green after the view is steady. After "Stop", the
   scan has 1 page, the page of the book. Before, the outline was around the
-  desk, and the count of spreads went up with no page turn. The time for a
-  frame on the phone was not measured.
+  desk, and the count of spreads went up with no page turn.
+- On the phone, the library works 37 ms to 49 ms on a frame of that scene, and
+  it gets 20 to 26 frames in a second from the camera, which gives 30. The
+  library holds 7 to 11 full-size frames.
 
 The page counts of the PUCIT videos show a fault of decision 0024, not of this
 decision: see "Limits".

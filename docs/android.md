@@ -153,6 +153,13 @@ adb shell am start -a android.intent.action.VIEW -t video/mp4 \
   one rotation for all its frames.
 - The preview and the frames for the library have the same shape, 4 x 3 parts.
   The screen then shows all that the library sees.
+- The camera drops the frames that come while the library works on a frame.
+  During a scan, `CameraSource` writes one line to the log for each 60 frames:
+  the frames in a second that the library gets, and the time that it works on a
+  frame. Read it with `adb logcat -s fastscan`. On the phone of the tests, on a
+  white desk where each frame runs the three rules of the detector, the library
+  gets 20 to 26 frames in a second and works 37 ms to 49 ms on a frame of 2880 x
+  2160 pixels.
 - `push` returns the status of the frame: the page corners, `steady`, and
   `captured`. The screen draws the outline of each page: white for a page that
   moves, yellow for a steady view, green when the user can turn the page.

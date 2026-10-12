@@ -25,6 +25,7 @@ import br.com.jayson.fastestscan.core.ColorRange
 import br.com.jayson.fastestscan.core.FrameFormat
 import br.com.jayson.fastestscan.core.ScanSession
 import br.com.jayson.fastestscan.core.ScanStatus
+import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -76,6 +77,11 @@ class CameraSource(
     /** The format of the first frame of [session], and the map of its frames. Only the camera thread uses them. */
     private var sessionFormat: FrameFormat? = null
     private var uprightToSensor: Matrix? = null
+
+    /** The frames since the last line of the log, and the time that the library took for them. Only the camera thread uses them. */
+    private var loggedFrames = 0
+    private var libraryNanos = 0L
+    private var logStartNanos = 0L
 
     @Volatile
     private var scanning = false
@@ -144,6 +150,8 @@ class CameraSource(
             this.listener = listener
             this.onError = onError
             session = null
+            loggedFrames = 0
+            libraryNanos = 0L
             scanning = true
         }
     }
@@ -188,7 +196,9 @@ class CameraSource(
                 }
                 check(format == sessionFormat) { context.getString(R.string.error_turned) }
                 val planes = image.planes.map { FramePlane(it.buffer, it.rowStride, it.pixelStride) }
+                val before = System.nanoTime()
                 val status = current.pushFrame(planes, crop, image.imageInfo.timestamp / NANOSECONDS_PER_SECOND)
+                logSpeed(before, System.nanoTime(), status)
                 listener?.onFrame(uprightToSensor, status)
             } catch (error: Throwable) {
                 // The owner of the session closes it. The next scan gets a new one.
@@ -199,8 +209,33 @@ class CameraSource(
         }
     }
 
+    /**
+     * Write the speed of the scan to the log, one line for each [LOG_FRAMES]
+     * frames: how many frames in a second the library gets, and how long it works
+     * on a frame. The camera drops the frames that come while the library works.
+     */
+    private fun logSpeed(before: Long, after: Long, status: ScanStatus) {
+        if (loggedFrames == 0) logStartNanos = before
+        loggedFrames += 1
+        libraryNanos += after - before
+        if (loggedFrames < LOG_FRAMES) return
+        val seconds = (after - logStartNanos) / NANOSECONDS_PER_SECOND
+        val milliseconds = libraryNanos / NANOSECONDS_PER_MILLISECOND / loggedFrames
+        Log.i(
+            TAG,
+            "camera speed: %.1f frames in a second, %.1f ms in the library for each frame, %d frames in memory, %d pages in view"
+                .format(Locale.ROOT, loggedFrames / seconds, milliseconds, status.heldFrames, status.pages.size),
+        )
+        loggedFrames = 0
+        libraryNanos = 0L
+    }
+
     private companion object {
         const val TAG = "fastscan"
+
+        /** The log gets one line about the speed for this many frames. */
+        const val LOG_FRAMES = 60
+        const val NANOSECONDS_PER_MILLISECOND = 1_000_000.0
 
         /**
          * The shape of the frames: 4 x 3 parts, the shape of most camera sensors. An

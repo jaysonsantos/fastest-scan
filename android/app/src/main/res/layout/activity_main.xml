@@ -28,13 +28,13 @@
             android:layout_height="match_parent" />
 
         <!-- The picture is at the start of this frame. On a long screen, this
-            corner is free. -->
+            corner is free: the small page does not cover the picture. -->
         <ImageView
             android:id="@+id/last_page"
-            android:layout_width="96dp"
-            android:layout_height="136dp"
+            android:layout_width="@dimen/last_page_width"
+            android:layout_height="@dimen/last_page_height"
             android:layout_gravity="bottom|end"
-            android:layout_margin="12dp"
+            android:layout_margin="8dp"
             android:contentDescription="@string/last_page_description"
             android:scaleType="fitCenter" />
     </FrameLayout>

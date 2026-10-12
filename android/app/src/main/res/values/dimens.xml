@@ -4,4 +4,8 @@
         of 18 x 9 parts or longer, a picture of 4 x 3 parts leaves this width free. -->
     <dimen name="side_panel_width">200dp</dimen>
     <dimen name="button_gap">8dp</dimen>
+    <!-- The small picture of the last page. On a screen of 20 x 9 parts, a picture
+        of 4 x 3 parts leaves a little more than this width free at its side. -->
+    <dimen name="last_page_width">72dp</dimen>
+    <dimen name="last_page_height">102dp</dimen>
 </resources>
