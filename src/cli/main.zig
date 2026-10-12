@@ -6,6 +6,8 @@ const fastscan = @import("fastscan");
 const args = @import("args.zig");
 const ffmpeg = @import("ffmpeg.zig");
 const pipeline = @import("pipeline.zig");
+const stream = @import("stream.zig");
+const system = @import("system.zig");
 
 const exit_code = struct {
     const ok = 0;
@@ -73,6 +75,8 @@ fn run(init: std.process.Init, config: *const args.Config, stdout: *Io.Writer) !
         config.jobs
     else
         @max(1, (std.Thread.getCpuCount() catch 1) / cpu_threads_per_worker);
+    // The stream mode has one decoder, and its workers only render.
+    if (config.stream) return stream.run(io, gpa, config, &info, worker_count, stdout);
     if (config.verbose) {
         std.debug.print("video: {d}x{d}, {d} frames, {d:.1} s; {d} workers, {d} decoders\n", .{
             info.width,
@@ -147,6 +151,9 @@ fn run(init: std.process.Init, config: *const args.Config, stdout: *Io.Writer) !
             document.frames_needed,
             document.frames_to_decode,
         });
+        if (system.peakMemoryBytes(io)) |bytes| {
+            std.debug.print("memory: at most {d} MB in this process\n", .{bytes / bytes_per_megabyte});
+        }
     }
 
     const pdf_bytes = try pipeline.writePdf(io, gpa, config.output, &document, config.dpi);
@@ -162,5 +169,7 @@ test {
     _ = args;
     _ = ffmpeg;
     _ = pipeline;
+    _ = stream;
+    _ = system;
     _ = @import("parallel.zig");
 }

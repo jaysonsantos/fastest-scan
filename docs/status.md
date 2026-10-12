@@ -35,6 +35,16 @@ takes 92 s. With all frames in a cache (`--cache-dir`), it takes 28 s: that is t
 time for the work on the program. The two times are for a machine that does no
 other work. `docs/benchmark-log.md` has the numbers of each step.
 
+The program has a second flow, `--stream`: it reads the video one time, in order,
+with no frame cache, and keeps only a few full-size frames of each spread. This
+is the flow of the Android app (decision 0019). On the benchmark video it gives
+the 63 pages, with the OCR numbers of the two passes, in 145 s to 178 s. At most
+38 full-size frames are in memory at one time.
+
+```sh
+zig-out/bin/fastest-scan ~/VID_20261009_180010.mp4 -o out/stream.pdf -v --stream
+```
+
 Each page comes from its own reference frame: the frame of the spread that shows
 the most ink of that page (decision 0013). Up to 9 other frames repair it, 3 of
 them frames that cut the page (views from near):
@@ -80,7 +90,11 @@ finger is lost: `--fingers blank` and `--fingers keep` change the rule.
 | `prototypes/fusion/`: the Python experiment behind the fusion | A record. See `docs/research/fusion-prototype.md`. |
 | `prototypes/fingers/`: the Python experiment behind the finger mask | A record. See decision 0014. |
 | `curl.zig`: a page map for a curled page, after He et al. 2013 | Done, tested on synthetic pages. Off by default (`--curl`): it lowers the quality on the benchmark. See decision 0012. |
-| C interface | Only `fastscan_version` |
+| `timeline.Tracker`, `dedup.Resolver`: the timeline and the duplicate search for frames and spreads that come one by one | Done, tested. `timeline.build` and `dedup.resolve` are loops over them: the PDF of the two passes has the same bytes as before. |
+| `intake.zig`: a frame of a phone (row strides, U and V in turn, on its side) as a frame of the library; the small frame for the analysis | Done, tested |
+| `stream.zig`: the stream session: frames in order, a few frames in memory, a job for each spread | Works on the benchmark: 63 pages. Tested with synthetic videos. No frames from the time before a spread: decision 0019. |
+| CLI `--stream`: the stream session on a desktop, one pass with no frame cache | Done |
+| C interface (`include/fastscan.h`): the stream session | Done. `tests/c_api.c` uses the header only; `zig build test` runs it. |
 
 Debug output (`--debug-dir`): `analysis.csv` (one line per frame), `segments.csv`
 (one line per spread), `frames/` (every 15th analysis frame with the page quads),
@@ -149,7 +163,6 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
      commands to get the videos.
    - Hough or line-segment detector for low-contrast desks, with the quad of the
      frame before as a prior (the best SmartDoc 2015 methods do this).
-   - Complete C interface (`c_api.zig` has only the version).
 7. `scripts/bench.sh` prints the page count, the time, the size, and OCR numbers.
    Missing: a sharpness number and a glare area number.
 8. **The code against the conventions of the Zig standard library.** A check on
@@ -169,6 +182,15 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
      cover the entry points that the CLI calls. They found no more memory that
      stays. `detect.zig` has no test of its own: the tests of `observe.zig` and
      `render.zig` run it.
+9. **The stream session** (decision 0019). The library, the C interface, and the
+   stream mode of the CLI are done. What is left:
+   - The JNI layer and the Android app on top of the C interface.
+   - Add the stream mode to `scripts/bench.sh` and to CI.
+   - Export `Stream.analyze` and `Stream.pushObserved` in the C interface, so
+     that a recorded video is analysed on more than one thread.
+   - Make a spread final before the next spread ends, so that its pages come
+     earlier.
+   - Keep some frames from the time before a spread starts, as donor frames.
 
 ## Known problems
 
@@ -200,6 +222,16 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
 - A thin line of the desk in a shadow shows at some page edges: a thin blob is a
   finger only when it is in the light.
 - The unsharp mask makes the compression noise of the video visible.
+- **Stream mode: the pages of a spread come one spread late.** A spread is final
+  only when the next spread ends.
+- **Stream mode: the page size comes from the first two spreads.** On the
+  benchmark it is 1442 x 2025 pixels; the two passes give 1292 x 1868.
+- **Stream mode: a later copy of a spread gives no frames to the first copy.**
+  The better copy stays with its own frames.
+- **Stream mode: the memory is high for a phone.** On the desktop, with frames of
+  3840 x 2160 pixels, the process holds 1.4 GB with two render threads, 1.2 GB
+  with a limit of 24 frames, and 0.7 GB with one render thread, a limit of 16
+  frames, and worse pages. Decision 0019 has the table.
 
 
 ## Open questions

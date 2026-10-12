@@ -39,6 +39,8 @@
               pkgs.taplo
               pkgs.shellcheck
               pkgs.shfmt
+              # clang-format, for the C header and the C test
+              pkgs.clang-tools
               pkgs.nixfmt
               pkgs.typos
               pkgs.actionlint

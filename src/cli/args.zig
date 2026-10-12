@@ -28,6 +28,9 @@ pub const defaults = struct {
     pub const analysis_height = 540;
     /// The number of other frames that repair the reference frame of a spread.
     pub const fusion_frames = 6;
+    /// With `--stream`: the number of other frames that the program keeps for a
+    /// spread. A phone has less memory than a desktop.
+    pub const stream_frames = 4;
 };
 
 const limits = struct {
@@ -38,6 +41,7 @@ const limits = struct {
     const min_analysis_height = 180;
     const max_analysis_height = 2160;
     const max_fusion_frames = 12;
+    const max_stream_held_frames = 4096;
 };
 
 // endregion: names and defaults
@@ -52,6 +56,12 @@ pub const Config = struct {
     analysis_height: u32 = defaults.analysis_height,
     /// 0 turns the repair with other frames off.
     fusion_frames: u8 = defaults.fusion_frames,
+    /// Read the video one time, in order, as a phone does: see decision 0019.
+    stream: bool = false,
+    /// With `stream`: the other frames that the program keeps for a spread.
+    stream_frames: u8 = defaults.stream_frames,
+    /// With `stream`: the largest number of full-size frames in memory. 0: no limit.
+    stream_held_frames: u32 = 0,
     /// Correct the curl of the pages. Off by default: see decision 0012.
     curl: bool = false,
     /// Which fingers that hold the page in all frames get the colour of the
@@ -95,6 +105,9 @@ const Flag = enum {
     jobs,
     analysis_height,
     fusion_frames,
+    stream,
+    stream_frames,
+    stream_held_frames,
     curl,
     fingers,
     ffmpeg,
@@ -128,6 +141,9 @@ const specs = [_]Spec{
     .{ .flag = .jobs, .long = "jobs", .short = 'j', .value = "N", .env_name = env.jobs, .help = "Parallel workers. Each one runs two decoders and holds about 0.7 GB for a 4K video. Default: half of the CPU threads" },
     .{ .flag = .analysis_height, .long = "analysis-height", .value = "PIXELS", .help = "Short side of the frames of the first pass. Default: 540" },
     .{ .flag = .fusion_frames, .long = "fusion-frames", .value = "0..12", .help = "Other frames that repair glare and covered parts of a page. Up to 3 views from near come in addition. 0 turns the repair off. Default: 6" },
+    .{ .flag = .stream, .long = "stream", .help = "Read the video one time, in order, as the phone app does. The program keeps only a few full-size frames of each spread" },
+    .{ .flag = .stream_frames, .long = "stream-frames", .value = "0..12", .help = "With --stream: other frames that the program keeps for a spread. Half as many views from near come in addition. Default: 4" },
+    .{ .flag = .stream_held_frames, .long = "stream-held-frames", .value = "N", .help = "With --stream: the largest number of full-size frames in memory. A spread gets fewer other frames when the limit is near. Default: no limit" },
     .{ .flag = .curl, .long = "curl", .help = "Correct the curl of the pages of a thick book (experimental)" },
     .{ .flag = .fingers, .long = "fingers", .value = "all|blank|keep", .help = "A finger that holds the page in all frames: all = paint over it, blank = only when the paper around it is blank, keep = leave it. Default: all" },
     .{ .flag = .ffmpeg, .long = "ffmpeg", .value = "PROGRAM", .env_name = env.ffmpeg, .help = "The ffmpeg program. Default: " ++ defaults.ffmpeg },
@@ -243,6 +259,9 @@ fn apply(config: *Config, flag: Flag, value: []const u8) ParseError!void {
         .jobs => config.jobs = try parseInt(u32, value, 0, std.math.maxInt(u16)),
         .analysis_height => config.analysis_height = try parseInt(u32, value, limits.min_analysis_height, limits.max_analysis_height),
         .fusion_frames => config.fusion_frames = try parseInt(u8, value, 0, limits.max_fusion_frames),
+        .stream => config.stream = true,
+        .stream_frames => config.stream_frames = try parseInt(u8, value, 0, limits.max_fusion_frames),
+        .stream_held_frames => config.stream_held_frames = try parseInt(u32, value, 0, limits.max_stream_held_frames),
         .curl => config.curl = true,
         .fingers => config.fingers = try parseFingers(value),
         .ffmpeg => config.ffmpeg = value,
@@ -364,6 +383,16 @@ test "the number of fusion frames" {
     try testing.expectEqual(@as(u8, defaults.fusion_frames), (try parse(&.{"in.mp4"}, Environment.empty)).run.fusion_frames);
     try testing.expectEqual(@as(u8, 0), (try parse(&.{ "in.mp4", "--fusion-frames", "0" }, Environment.empty)).run.fusion_frames);
     try testing.expectError(error.InvalidValue, parse(&.{ "in.mp4", "--fusion-frames", "99" }, Environment.empty));
+}
+
+test "the stream mode and its frame numbers" {
+    const off = (try parse(&.{"in.mp4"}, Environment.empty)).run;
+    try testing.expect(!off.stream);
+    try testing.expectEqual(@as(u8, defaults.stream_frames), off.stream_frames);
+    const on = (try parse(&.{ "in.mp4", "--stream", "--stream-frames", "2", "--stream-held-frames=24" }, Environment.empty)).run;
+    try testing.expect(on.stream);
+    try testing.expectEqual(@as(u8, 2), on.stream_frames);
+    try testing.expectEqual(@as(u32, 24), on.stream_held_frames);
 }
 
 test "flags without a value" {

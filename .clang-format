@@ -1,0 +1,13 @@
+# The format of the C files: the header of the library, the JNI layer of the Android
+# app, and the C test. `prek run clang-format --all-files` checks it.
+BasedOnStyle: LLVM
+# The repository indents with 4 spaces (.editorconfig). A continued line gets 8
+# spaces and no alignment, so that each indent is a multiple of 4.
+IndentWidth: 4
+ContinuationIndentWidth: 8
+AlignAfterOpenBracket: DontAlign
+AlignOperands: DontAlign
+AlignEscapedNewlines: DontAlign
+ColumnLimit: 100
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: WithoutElse

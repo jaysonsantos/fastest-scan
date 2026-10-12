@@ -11,8 +11,10 @@ Read `docs/status.md` first. It says what works, what does not, and what is next
 |---|---|
 | `src/lib/` | The library `fastscan`. All image processing. No file access, no processes. |
 | `src/lib/root.zig` | The Zig interface of the library. |
-| `src/lib/c_api.zig`, `include/fastscan.h` | The C interface, for an Android (JNI) app or another language. |
+| `src/lib/stream.zig` | The stream session: frames in the order of the video, pages while the video runs. The flow of the Android app (decision 0019). |
+| `src/lib/c_api.zig`, `include/fastscan.h` | The C interface: the stream session, for an Android (JNI) app or another language. |
 | `src/cli/` | The program `fastest-scan`: arguments, `ffmpeg` processes, threads, the output file. |
+| `tests/` | Programs that use the library from outside: `c_api.c` is a C program on the header. |
 | `build.zig`, `build.zig.zon` | The build. `build.zig.zon` holds the only version number. |
 | `scripts/` | `lint.sh`, `test.sh`, `all.sh`, `build.sh`, `bench.sh`, `release.sh`. |
 | `docs/status.md` | The state of the work and the next steps. Change it in each commit that changes the state. |
@@ -30,6 +32,8 @@ Read `docs/status.md` first. It says what works, what does not, and what is next
 - Build (debug): `zig build`. Build (fast): `scripts/build.sh`.
 - Run: `zig build run -- <video> -o out.pdf`, or `zig-out/bin/fastest-scan`.
 - Test: `scripts/test.sh`. One file: `zig test src/lib/geometry.zig`.
+- Run the flow of the phone app on a desktop: `zig-out/bin/fastest-scan <video> -o
+  out.pdf --stream -v`. It reads the video one time, with no frame cache.
 - Lint: `scripts/lint.sh`. One linter: `prek run <hook-id> --all-files`.
   `scripts/check-deprecated.sh` finds a deprecated name of the Zig standard
   library; the compiler gives no warning for it.
@@ -57,6 +61,10 @@ Read `docs/status.md` first. It says what works, what does not, and what is next
 - The library must not import `std.Io`, `std.fs`, `std.process`, or `std.Thread`.
   The caller gives frames and receives bytes. Threads belong to the caller.
 - The library has no C dependency.
+- The library has no lock. One thread at a time calls the functions of a stream
+  session; `stream.Job.run` works on its job only and can run on another thread.
+- `include/fastscan.h` and `src/lib/c_api.zig` declare the same structs, field by
+  field. Change the two together, and `tests/c_api.c` with them.
 - The library frees each block that it takes, also from a `scratch` allocator: do
   not rely on an arena. The CLI gives each worker a `memory.BlockCache`, which uses
   a large block again for the next request of the same size (decision 0017).

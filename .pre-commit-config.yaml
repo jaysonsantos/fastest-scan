@@ -66,6 +66,12 @@ repos:
         language: system
         files: \.sh$
 
+      - id: clang-format
+        name: clang-format
+        entry: clang-format --dry-run --Werror
+        language: system
+        files: \.(c|h)$
+
       - id: taplo
         name: taplo fmt
         entry: taplo fmt --check

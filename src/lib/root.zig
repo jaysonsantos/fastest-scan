@@ -8,6 +8,7 @@ const build_options = @import("build_options");
 
 pub const geometry = @import("geometry.zig");
 pub const image = @import("image.zig");
+pub const intake = @import("intake.zig");
 pub const color = @import("color.zig");
 pub const raster = @import("raster.zig");
 pub const detect = @import("detect.zig");
@@ -25,6 +26,7 @@ pub const curl = @import("curl.zig");
 pub const jpeg = @import("jpeg.zig");
 pub const pdf = @import("pdf.zig");
 pub const memory = @import("memory.zig");
+pub const stream = @import("stream.zig");
 
 /// The version of the library, from `build.zig.zon`.
 pub const version: []const u8 = build_options.version;

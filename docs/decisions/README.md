@@ -24,6 +24,7 @@ replaces it and name the old file in the new one.
 | [0016](0016-sharp-donor-in-the-region.md) | A region takes the donor that is sharp in the region |
 | [0017](0017-worker-memory-from-a-block-cache.md) | A worker keeps its large blocks of memory |
 | [0018](0018-skin-test-for-dark-hands.md) | The skin test accepts dark hands and skin in a shadow |
+| [0019](0019-stream-session-for-a-phone.md) | A stream session for a phone: each frame one time, pages while the video runs |
 | [0020](0020-one-thread-per-decoder.md) | A decoder has one thread and gives only the frames that a job needs |
 | [0021](0021-finger-sizes-follow-the-page-width.md) | The sizes of the finger rule follow the page width |
 | [0022](0022-thin-blob-of-lit-skin.md) | A thin blob of skin in the light is a finger |

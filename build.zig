@@ -71,16 +71,35 @@ pub fn build(b: *std.Build) void {
 
     // region: tests and checks
 
-    const test_step = b.step("test", "Run the unit tests of the library and the CLI");
+    const test_step = b.step("test", "Run the unit tests of the library and the CLI, and the C program of tests/");
     for ([_]*std.Build.Module{ lib_module, c_api_module, cli_module }) |module| {
         const tests = b.addTest(.{ .root_module = module });
         test_step.dependOn(&b.addRunArtifact(tests).step);
     }
 
+    // A C program that uses the static library through the header only.
+    const c_test_module = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    c_test_module.addCSourceFile(.{
+        .file = b.path("tests/c_api.c"),
+        .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Wpedantic", "-Werror" },
+    });
+    c_test_module.addIncludePath(b.path("include"));
+    c_test_module.linkLibrary(static_lib);
+    const c_test = b.addExecutable(.{ .name = "fastscan-c-api-test", .root_module = c_test_module });
+    const run_c_test = b.addRunArtifact(c_test);
+    // The program prints one line on success: the build must not treat it as cached output only.
+    run_c_test.expectExitCode(0);
+    test_step.dependOn(&run_c_test.step);
+
     // Compile every target and install nothing. The linter hook and the editor use it.
     const check_step = b.step("check", "Compile the library, the CLI, and the tests");
     check_step.dependOn(&static_lib.step);
     check_step.dependOn(&exe.step);
+    check_step.dependOn(&c_test.step);
     for ([_]*std.Build.Module{ lib_module, c_api_module, cli_module }) |module| {
         check_step.dependOn(&b.addTest(.{ .root_module = module }).step);
     }

@@ -54,6 +54,10 @@ The code has two parts:
   bytes. It has a C interface (`include/fastscan.h`) for an Android app.
 - `src/cli/` is the program. It decodes the video with `ffmpeg` and calls the library.
 
+The program has two flows. The default reads the video two times and jumps to
+the frames that it needs. `--stream` reads the video one time, in order, and
+keeps only a few frames in memory: the flow of the Android app.
+
 `docs/decisions/` has the reason for each design decision. `docs/research/` has the
 research behind them.
 
