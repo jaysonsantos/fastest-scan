@@ -209,6 +209,18 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
 
 ## Known problems
 
+- **A bright surface around the book gives wrong pages.** The page detector takes
+  the largest bright region of the frame for the paper (decision 0004). In a
+  video of 2026-10-12 from the phone (a paperback on a light grey floor, next to
+  a white wall, 1920 x 1080), the wall is the "page" of the cover, and the wall
+  and the floor are the two "pages" of each spread. The two passes, the stream
+  mode, and the app on the phone all give such a PDF: 18 pages on the desktop
+  and 14 on the phone, none of them a page of the book. Until the detector is
+  better, film on a dark, plain surface, with the book as large as the frame
+  allows. The difference between 18 and 14 pages is not explained.
+- **A small book in a 1920 x 1080 frame gives small pages.** In that video a page
+  is about 350 pixels wide. The benchmark has 3840 x 2160 pixels and a page of
+  1292 pixels.
 - **Glare that stays.** Glare stays where no frame of the spread shows the ink.
   Black header bars keep a gold tint on about 5 pages. Example: the left half of
   the header "SAFETY PRECAUTIONS/WARNINGS" (page 13 of the result).

@@ -95,7 +95,7 @@ Then run the tests on the device that `adb devices` shows:
 
 ```sh
 scripts/test-android.sh                    # a synthetic video: one minute
-scripts/test-android.sh video.mp4 63       # a recorded video and its page count
+scripts/test-android.sh video.mp4 63       # a recorded video, and its page count when known
 ```
 
 - With no argument, Gradle runs the tests of `android/app/src/androidTest/`.
@@ -104,7 +104,9 @@ scripts/test-android.sh video.mp4 63       # a recorded video and its page count
 - With a video, the script copies the video to the device and runs
   `VideoScanTest` with the decoder of the device. It copies `scan.pdf` and
   `scan-report.txt` to `out/android/`. The report has the page count, the time
-  for a frame, the frames in memory, and the native memory.
+  for a frame, the frames in memory, and the native memory. The app must be able
+  to read the video: `adb push` gives a file that all can read, and `adb shell
+  cp` does not.
 
 The benchmark video (180 s) gives 63 pages in 151 s on the phone, and in 698 s on
 the emulator: the software decoder of the emulator needs most of that time.
@@ -175,6 +177,9 @@ memory: no run with smaller settings was made on a phone.
 
 ## Limits
 
+- The book must lie on a dark, plain surface. With a bright surface around the
+  book, the page detector of the library takes the surface for a page:
+  `docs/status.md`, "Known problems".
 - The video must have 8 bits per sample. A video with 10 bits (HDR) is not supported.
 - The camera source asks for frames of 3840 x 2160 pixels and takes the nearest
   size that the phone gives. With smaller frames, the pages have fewer pixels.

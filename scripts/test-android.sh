@@ -3,7 +3,7 @@
 # Run this script in the Android shell of the flake: see scripts/build-android.sh.
 #
 #   scripts/test-android.sh                     # a synthetic video: one minute
-#   scripts/test-android.sh <video> <pages>     # a recorded video and its page count
+#   scripts/test-android.sh <video> [<pages>]   # a recorded video, and its page count when known
 #
 # With a video, the script copies the video to the device, scans it with the decoder
 # of the device, and copies the PDF and a report with the times and the memory to
@@ -33,7 +33,9 @@ if [[ $# -eq 0 ]]; then
 fi
 
 video="$1"
-pages="${2:?give the number of pages that the video has}"
+# With no page count, the test passes when the scan has one page or more.
+page_arguments=()
+if [[ $# -ge 2 ]]; then page_arguments=(-e pages "$2"); fi
 [[ -f $video ]] || {
   echo "the video is missing: $video" >&2
   exit 1
@@ -44,7 +46,7 @@ pages="${2:?give the number of pages that the video has}"
 adb shell mkdir -p "$DEVICE_DIR"
 adb push "$video" "$DEVICE_DIR/$DEVICE_VIDEO"
 # `am instrument` gives the exit code 0 also for a test that failed: read the result.
-result="$(adb shell am instrument -w -e class "$VIDEO_TEST" -e video "$DEVICE_VIDEO" -e pages "$pages" "$TEST_RUNNER")"
+result="$(adb shell am instrument -w -e class "$VIDEO_TEST" -e video "$DEVICE_VIDEO" "${page_arguments[@]}" "$TEST_RUNNER")"
 echo "$result"
 
 mkdir -p "$OUT_DIR"
