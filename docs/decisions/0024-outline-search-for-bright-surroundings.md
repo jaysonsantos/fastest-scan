@@ -103,13 +103,16 @@ All runs on 2026-10-12, on the desktop.
 | Benchmark at 1920 x 1080 | 64 pages | 64 pages, the same bytes of the PDF |
 | The phone video of 2026-10-12, two passes | 18 pages of 847 x 1078, none a page of the book | 7 pages of 369 x 577: the cover, and three spreads of the book |
 | The same video, stream mode | 18 pages, none a page of the book | 7 pages of 438 x 603, the same pages |
-| The same video, the app on the Android emulator | 14 pages on a phone, none a page of the book | 7 pages of 438 x 603, the same pages |
+| The same video, the app on the phone and on the Android emulator | 14 pages on the phone, none a page of the book | 7 pages of 438 x 603, the same pages, on the two |
 
 - On the benchmark, 145 of 4984 frames get another observation: frames in which
   the paper runs out of the frame during a page turn. The spreads of the
   timeline and the PDF do not change.
 - The analysis of the phone video takes 4.3 s, before 3.1 s: there the search
   runs on each frame.
+- On the phone (a REDMI Note 15 Pro+ 5G), the app needs 27 ms for each frame of
+  that video and 39 s for all of it, with 166 MB of native memory. The video has
+  49 s.
 - The phone video has more spreads than the result: see "Limits".
 - The app first gave 10 pages where the desktop gave 7. The cause was not the
   detector: the timeline rounded the limit of a break (0.15 seconds) to frames.

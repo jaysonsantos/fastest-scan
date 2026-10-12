@@ -79,7 +79,7 @@ finger is lost: `--fingers blank` and `--fingers keep` change the rule.
 | `pdf.zig`: PDF writer with a byte callback | Done, tested. `pdfinfo` reads the file. |
 | `raster.zig`: halving, histogram, Otsu, 3x3 morphology, largest region | Done, tested |
 | `detect.zig`: paper mask, edge lines, fold of a spread, page quads, clipped edges | Works on stable frames of the benchmark. Tests use synthetic frames. |
-| `detect.zig`: the outline search for a book on a surface as bright as its pages (decision 0024) | Works on one phone video of a bright room: the pages of the PDF are pages of the book. The benchmark keeps the same bytes. Not for a page that runs out of the frame. |
+| `detect.zig`: the outline search for a book on a surface as bright as its pages (decision 0024) | Works on one phone video of a bright room: the pages of the PDF are pages of the book, on the desktop and in the app on the phone. The benchmark keeps the same bytes. Not for a page that runs out of the frame. |
 | `observe.zig`: page thumbnail, covered cells, frame similarity | Done, tested |
 | `timeline.zig`: stable runs of frames, one reference frame per spread | Works, but splits some spreads in two |
 | `document.zig`: one page size for all pages | Done, tested |
