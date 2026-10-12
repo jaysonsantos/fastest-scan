@@ -4,6 +4,8 @@
 Furst = "Furst"
 Winn = "Winn"
 Gool = "Gool"
+# The start of the given name "Ondřej" in the BibTeX form of docs/references.bib.
+Ond = "Ond"
 
 [files]
 # flake.lock holds hashes; their letters read as words.

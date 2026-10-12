@@ -16,6 +16,7 @@ const Point = geometry.Point;
 const Line = geometry.Line;
 const Quad = geometry.Quad;
 const Plane = image.Plane;
+const PlaneView = image.PlaneView;
 
 // region: options and results
 
@@ -39,6 +40,23 @@ pub const Options = struct {
     min_separability: f32 = 0.45,
     /// The smallest paper region, as a fraction of the frame area.
     min_area_fraction: f32 = 0.04,
+    /// Look for the paper by its outline when the bright region is not like a sheet
+    /// of paper: a book on a surface as bright as its pages (decision 0024).
+    outline_search: bool = true,
+    /// The bright region stays when it is this much like a sheet of paper, from 0
+    /// to 1. See `paperLikeness`.
+    good_likeness: f32 = 0.5,
+    /// The region of the outline search must be this much like a sheet of paper.
+    min_outline_likeness: f32 = 0.35,
+    /// The region of the outline search must be better than the bright region by
+    /// this much.
+    likeness_margin: f32 = 0.15,
+    /// A pixel is a part of an outline when the luma changes by more than this
+    /// many codes from one pixel to the next one, after a small blur.
+    outline_step: f32 = 3.5,
+    /// One code of chroma counts as this many codes of luma in that measure. Paper
+    /// on a surface of the same brightness often differs in colour only.
+    outline_chroma_gain: f32 = 3.0,
     /// Width divided by height above which the paper can be a spread.
     spread_min_aspect: f32 = 1.12,
     /// The fold must lie within this fraction of the paper width from the middle.
@@ -133,6 +151,10 @@ pub const Scene = struct {
     threshold: u8,
     separability: f32,
     region: raster.Region,
+    /// The size of the steps of the outline of `region`, in pixels of the half-size
+    /// image. It is above 1 when the region comes from a smaller working image:
+    /// an edge line then needs more room for its points.
+    outline_step: f32 = 1,
     /// The factor from half-size coordinates to luma coordinates of the frame.
     scale: f32,
 
@@ -235,11 +257,12 @@ pub fn analyzeScene(allocator: Allocator, frame: image.FrameView, options: Optio
     const opened = try raster.dilate3(allocator, eroded);
     defer opened.deinit(allocator);
 
-    const region = (try raster.largestRegion(allocator, opened)) orelse {
+    var region = (try raster.largestRegion(allocator, opened)) orelse {
         luma.deinit(allocator);
         score.deinit(allocator);
         return null;
     };
+    errdefer region.deinit(allocator);
     const frame_area: f32 = @floatFromInt(@as(usize, score.width) * score.height);
     if (@as(f32, @floatFromInt(region.area)) < options.min_area_fraction * frame_area) {
         region.deinit(allocator);
@@ -248,12 +271,34 @@ pub fn analyzeScene(allocator: Allocator, frame: image.FrameView, options: Optio
         return null;
     }
 
+    // A bright region that lies on the frame border can be a wall or a desk, not
+    // the paper. The outline search then looks for a book inside the frame.
+    var outline_step: f32 = 1;
+    if (options.outline_search and region.touches_border) {
+        const likeness = try paperLikeness(allocator, region);
+        if (likeness < options.good_likeness) {
+            const planes: OutlinePlanes = .{ .luma = luma.view(), .u = frame.u, .v = frame.v, .width = width, .height = height };
+            if (try outlineRegion(allocator, planes, opened, options)) |found| {
+                var taken = false;
+                defer if (!taken) found.region.deinit(allocator);
+                const found_likeness = try paperLikeness(allocator, found.region);
+                if (found_likeness >= options.min_outline_likeness and found_likeness > likeness + options.likeness_margin) {
+                    region.deinit(allocator);
+                    region = found.region;
+                    outline_step = found.step;
+                    taken = true;
+                }
+            }
+        }
+    }
+
     return .{
         .luma = luma,
         .score = score,
         .threshold = split.threshold,
         .separability = split.separability,
         .region = region,
+        .outline_step = outline_step,
         .scale = Scene.half_scale,
     };
 }
@@ -261,6 +306,275 @@ pub fn analyzeScene(allocator: Allocator, frame: image.FrameView, options: Optio
 const min_scene_side = 32;
 
 // endregion: paper mask
+
+// region: outline search
+
+// A book on a surface as bright as its pages: no threshold of the paper score
+// separates the two. But the book has an outline: a step of brightness or of
+// colour, or a thin shadow line. The search marks the pixels with such a step as
+// walls and lets a flood run from the frame border over all other pixels. What
+// the flood does not reach is the walls and all that they enclose: the book with
+// its text, and thin lines such as the edge of a wall or a joint of the floor. An
+// opening removes the thin lines. The largest region that stays holds the paper.
+//
+// The flood enters a page that runs out of the frame. So the bright region stays
+// the first choice, and the search is for a book that lies inside the frame.
+//
+// The idea to take, among several shapes of a frame, the shape most like a sheet
+// of paper is from E. Carlinet and T. Géraud, the method of the LRDE in J.-C.
+// Burie et al., "ICDAR2015 Competition on Smartphone Document Capture and OCR
+// (SmartDoc)", ICDAR 2015. Their shapes come from the tree of shapes; the shapes
+// here are the bright region and the region inside the outline. The gradient
+// operator is that of I. Sobel and G. Feldman, "A 3x3 isotropic gradient operator
+// for image processing", Stanford Artificial Intelligence Project, 1968.
+// `prototypes/detect/` has the experiment behind this code.
+
+/// The search works on planes with at most this width, in pixels. A wider plane
+/// is made smaller first: the sizes below are in pixels of that working plane.
+const outline_work_width = 512;
+/// The opening removes lines up to two times this width.
+const thin_line_half_width = 4;
+/// The walls of an outline have this many pixels on each side of it: one from the
+/// blur and the gradient, and one from the step that makes the walls thicker.
+const wall_half_width = 2;
+/// How much a part of the outline on the frame border lowers the likeness: with
+/// one third of the outline on the border, the likeness is 0.
+const border_likeness_weight = 3.0;
+/// The sum of the weights of the 3x3 binomial blur, and of one side of the Sobel
+/// operator.
+const blur_weight_sum = 16.0;
+const sobel_weight_sum = 8.0;
+
+/// The planes of a frame for the outline search, all with one size.
+const OutlinePlanes = struct {
+    luma: PlaneView,
+    u: PlaneView,
+    v: PlaneView,
+    /// The part of the planes in use: the three planes can differ by one pixel.
+    width: u32,
+    height: u32,
+};
+
+const OutlineRegion = struct {
+    region: raster.Region,
+    /// The size of the steps of the outline of the region, in pixels of the planes.
+    step: f32,
+};
+
+/// How much a region is like a sheet of paper that lies inside the frame, from 0
+/// to 1: the product of three parts. The region fills its convex hull (a hand on
+/// the paper takes a bite out of it). The hull fills the smallest rectangle
+/// around it. The outline of the region does not lie on the frame border.
+fn paperLikeness(allocator: Allocator, region: raster.Region) Allocator.Error!f32 {
+    const boundary = try boundaryPoints(allocator, region);
+    defer allocator.free(boundary);
+    if (boundary.len < 3) return 0;
+    const last_x: f32 = @floatFromInt(region.mask.width - 1);
+    const last_y: f32 = @floatFromInt(region.mask.height - 1);
+    var on_border: usize = 0;
+    for (boundary) |p| {
+        if (p.x == 0 or p.y == 0 or p.x == last_x or p.y == last_y) on_border += 1;
+    }
+    const border_fraction = @as(f32, @floatFromInt(on_border)) / @as(f32, @floatFromInt(boundary.len));
+    const inside = @max(0, 1 - border_likeness_weight * border_fraction);
+    if (inside == 0) return 0;
+
+    const hull = try convexHull(allocator, boundary);
+    defer allocator.free(hull);
+    if (hull.len < 3) return 0;
+    const hull_area = polygonArea(hull);
+    const rectangle_area = smallestRectangleArea(hull);
+    if (!(hull_area > 0) or !(rectangle_area > 0)) return 0;
+    // The hull goes through pixel centers, so a solid region has a little more
+    // area than its hull.
+    const solidity = @min(1, @as(f32, @floatFromInt(region.area)) / hull_area);
+    const rectangle_fill = @min(1, hull_area / rectangle_area);
+    return solidity * rectangle_fill * inside;
+}
+
+/// The area of a convex polygon.
+fn polygonArea(points: []const Point) f32 {
+    var twice: f32 = 0;
+    for (points, 0..) |a, index| {
+        const b = points[(index + 1) % points.len];
+        twice += a.cross(b);
+    }
+    return 0.5 * @abs(twice);
+}
+
+/// The area of the smallest rectangle around a convex hull. One side of that
+/// rectangle lies on an edge of the hull: see `paperFrame`.
+fn smallestRectangleArea(hull: []const Point) f32 {
+    var best = std.math.inf(f32);
+    for (hull, 0..) |a, index| {
+        const edge = hull[(index + 1) % hull.len].sub(a);
+        if (edge.length() < min_hull_edge) continue;
+        const axis = edge.normalized();
+        const normal = axis.perpendicular();
+        var min_u = std.math.inf(f32);
+        var max_u = -std.math.inf(f32);
+        var min_v = std.math.inf(f32);
+        var max_v = -std.math.inf(f32);
+        for (hull) |p| {
+            const along = p.dot(axis);
+            const across = p.dot(normal);
+            min_u = @min(min_u, along);
+            max_u = @max(max_u, along);
+            min_v = @min(min_v, across);
+            max_v = @max(max_v, across);
+        }
+        best = @min(best, (max_u - min_u) * (max_v - min_v));
+    }
+    return if (std.math.isInf(best)) 0 else best;
+}
+
+/// Find the paper as the largest region that a flood from the frame border does
+/// not reach. `bright` is the paper mask of the frame: a hand on the book is
+/// inside the outline of the book, and it is not bright. Returns null when the
+/// flood leaves no region of the smallest size.
+fn outlineRegion(allocator: Allocator, planes: OutlinePlanes, bright: Plane, options: Options) Allocator.Error!?OutlineRegion {
+    const factor: u32 = @max(1, (planes.width + outline_work_width - 1) / outline_work_width);
+    const width: u32 = planes.width / factor;
+    const height: u32 = planes.height / factor;
+    if (width < min_scene_side or height < min_scene_side) return null;
+    const pixel_count = @as(usize, width) * height;
+
+    // The strength of the steps of the three planes.
+    const strength = try allocator.alloc(f32, pixel_count);
+    defer allocator.free(strength);
+    @memset(strength, 0);
+    const sources = [_]struct { plane: PlaneView, gain: f32 }{
+        .{ .plane = planes.luma, .gain = 1 },
+        .{ .plane = planes.u, .gain = options.outline_chroma_gain },
+        .{ .plane = planes.v, .gain = options.outline_chroma_gain },
+    };
+    for (sources) |source| {
+        const small = try reducePlane(allocator, source.plane, width, height, factor);
+        defer small.deinit(allocator);
+        try addStepStrength(allocator, strength, small, source.gain);
+    }
+
+    const thin_walls = try Plane.init(allocator, width, height);
+    defer thin_walls.deinit(allocator);
+    for (thin_walls.data, strength) |*wall, value| wall.* = if (value > options.outline_step) raster.mask_set else 0;
+    // Thicker walls close the small gaps of an outline.
+    const walls = try raster.dilate3(allocator, thin_walls);
+    defer walls.deinit(allocator);
+
+    // What the flood does not reach: the walls and all that they enclose.
+    const enclosed = try raster.floodFromBorder(allocator, walls);
+    defer enclosed.deinit(allocator);
+    for (enclosed.data) |*value| value.* = if (value.* == 0) raster.mask_set else 0;
+    const without_lines = try repeatMorphology(allocator, enclosed, thin_line_half_width, raster.erode3);
+    defer without_lines.deinit(allocator);
+    const solid = try repeatMorphology(allocator, without_lines, thin_line_half_width, raster.dilate3);
+    defer solid.deinit(allocator);
+
+    const blob = (try raster.largestRegion(allocator, solid)) orelse return null;
+    defer blob.deinit(allocator);
+    if (@as(f32, @floatFromInt(blob.area)) < options.min_area_fraction * @as(f32, @floatFromInt(pixel_count))) return null;
+    // The outline of the paper is in the middle of its walls.
+    const tight = try repeatMorphology(allocator, blob.mask, wall_half_width, raster.erode3);
+    defer tight.deinit(allocator);
+
+    // Back at the size of the planes, with only the bright pixels.
+    const mask = try Plane.initFilled(allocator, bright.width, bright.height, 0);
+    defer mask.deinit(allocator);
+    for (0..@min(bright.height, height * factor)) |y| {
+        const tight_row = tight.row(y / factor);
+        const bright_row = bright.row(y);
+        const mask_row = mask.row(y);
+        for (0..@min(bright.width, width * factor)) |x| {
+            mask_row[x] = tight_row[x / factor] & bright_row[x];
+        }
+    }
+    const region = (try raster.largestRegion(allocator, mask)) orelse return null;
+    const frame_pixels: f32 = @floatFromInt(@as(usize, bright.width) * bright.height);
+    if (@as(f32, @floatFromInt(region.area)) < options.min_area_fraction * frame_pixels) {
+        region.deinit(allocator);
+        return null;
+    }
+    return .{ .region = region, .step = @floatFromInt(factor) };
+}
+
+/// A plane of `width` x `height` pixels: each pixel is the mean of `factor` x
+/// `factor` pixels of the source.
+fn reducePlane(allocator: Allocator, source: PlaneView, width: u32, height: u32, factor: u32) Allocator.Error!Plane {
+    const out = try Plane.init(allocator, width, height);
+    const cell_pixels = factor * factor;
+    for (0..height) |y| {
+        const target = out.row(y);
+        for (target, 0..) |*value, x| {
+            var sum: u32 = 0;
+            for (0..factor) |sub_y| {
+                const row = source.data[(y * factor + sub_y) * source.stride ..];
+                for (row[x * factor ..][0..factor]) |sample| sum += sample;
+            }
+            value.* = @intCast((sum + cell_pixels / 2) / cell_pixels);
+        }
+    }
+    return out;
+}
+
+/// Add the strength of the steps of a plane to `strength`: the length of the
+/// Sobel gradient after a 3x3 binomial blur, in codes for one pixel, times
+/// `gain`. A pixel outside the plane has the value of the nearest pixel inside.
+fn addStepStrength(allocator: Allocator, strength: []f32, plane: Plane, gain: f32) Allocator.Error!void {
+    const width: usize = plane.width;
+    const height: usize = plane.height;
+    // The blur as a sum of 16 weights, with no division.
+    const blurred = try allocator.alloc(u16, width * height);
+    defer allocator.free(blurred);
+    for (0..height) |y| {
+        const above = plane.row(y -| 1);
+        const here = plane.row(y);
+        const below = plane.row(@min(y + 1, height - 1));
+        for (0..width) |x| {
+            const left = x -| 1;
+            const right = @min(x + 1, width - 1);
+            blurred[y * width + x] =
+                @as(u16, above[left]) + 2 * @as(u16, above[x]) + above[right] +
+                2 * @as(u16, here[left]) + 4 * @as(u16, here[x]) + 2 * @as(u16, here[right]) +
+                @as(u16, below[left]) + 2 * @as(u16, below[x]) + below[right];
+        }
+    }
+    const scale = gain / (blur_weight_sum * sobel_weight_sum);
+    for (0..height) |y| {
+        const above = blurred[(y -| 1) * width ..][0..width];
+        const here = blurred[y * width ..][0..width];
+        const below = blurred[@min(y + 1, height - 1) * width ..][0..width];
+        for (0..width) |x| {
+            const left = x -| 1;
+            const right = @min(x + 1, width - 1);
+            const across: f32 = @floatFromInt(@as(i32, above[right]) + 2 * @as(i32, here[right]) + below[right] -
+                @as(i32, above[left]) - 2 * @as(i32, here[left]) - below[left]);
+            const down: f32 = @floatFromInt(@as(i32, below[left]) + 2 * @as(i32, below[x]) + below[right] -
+                @as(i32, above[left]) - 2 * @as(i32, above[x]) - above[right]);
+            strength[y * width + x] += scale * @sqrt(across * across + down * down);
+        }
+    }
+}
+
+/// Apply a 3x3 morphology step `times` times. The result is a new plane, also for
+/// zero times.
+fn repeatMorphology(
+    allocator: Allocator,
+    mask: Plane,
+    times: usize,
+    comptime step: fn (Allocator, Plane) Allocator.Error!Plane,
+) Allocator.Error!Plane {
+    var current = try Plane.init(allocator, mask.width, mask.height);
+    @memcpy(current.data, mask.data);
+    errdefer current.deinit(allocator);
+    for (0..times) |_| {
+        const next = try step(allocator, current);
+        current.deinit(allocator);
+        current = next;
+    }
+    return current;
+}
+
+// endregion: outline search
 
 // region: paper frame
 
@@ -758,7 +1072,8 @@ pub fn detectLayout(allocator: Allocator, scene: *const Scene, options: Options)
     if (paper_width < min_page_side or paper_height < min_page_side) return null;
 
     var scratch: [max_profile_points]Point = undefined;
-    const tolerance = options.edge_tolerance;
+    // The outline of a region from a smaller working image has steps.
+    const tolerance = options.edge_tolerance * scene.outline_step;
     const left_axis = Point.init(-1, 0);
     const right_axis = Point.init(1, 0);
     const up_axis = Point.init(0, -1);
@@ -1137,6 +1452,7 @@ fn plausiblePage(quad: Quad) bool {
 // region: tests
 
 const testing = std.testing;
+const alloc_check = @import("alloc_check.zig");
 
 /// A synthetic frame: a dark desk with a bright paper shape given by `inside`.
 const TestFrame = struct {
@@ -1370,6 +1686,167 @@ test "completeQuad restores a page that is cut at the top" {
     // Two cut sides give no answer: the quad stays.
     const unchanged = completeQuad(cut, .{ .top = true, .bottom = true }, 200.0 / 300.0);
     try expectPointNear(cut.tl, unchanged.tl, 0.01);
+}
+
+/// A frame of a bright room: a white wall on the left, a floor that is a little
+/// darker, a thin dark line between the two, a dark hand that comes in from the
+/// bottom border, and a book page on the floor. The page is as bright as the wall
+/// and has the colour of cream. No brightness threshold separates the page from
+/// the floor and the wall: the bright region of the frame is the wall, the floor,
+/// and the page together.
+const BrightRoom = struct {
+    buffer: []u8,
+    view: image.FrameView,
+    /// The page in luma pixels of the frame.
+    page: Quad,
+
+    const wall_luma = 200;
+    const floor_luma = 185;
+    const line_luma = 150;
+    const hand_luma = 60;
+    const text_luma = 90;
+    const neutral = 128;
+    const cream_u = 120;
+    const cream_v = 134;
+
+    /// `scale` is 1 for a frame of 640 x 480 pixels.
+    fn init(scale: u32) !BrightRoom {
+        const width = 640 * scale;
+        const height = 480 * scale;
+        const buffer = try testing.allocator.alloc(u8, image.packedFrameSize(width, height));
+        const luma_size = width * height;
+        const chroma_width = width / 2;
+        const chroma_size = chroma_width * (height / 2);
+        const unit: f32 = @floatFromInt(scale);
+        const page = Quad{
+            .tl = Point.init(330 * unit, 110 * unit),
+            .tr = Point.init(530 * unit, 110 * unit),
+            .br = Point.init(530 * unit, 390 * unit),
+            .bl = Point.init(330 * unit, 390 * unit),
+        };
+        const Paint = struct {
+            /// The luma of a pixel, and true when the pixel is a part of the page.
+            fn at(room_page: Quad, room_unit: f32, x: f32, y: f32) struct { u8, bool } {
+                const fx = x / room_unit;
+                const fy = y / room_unit;
+                if (room_page.contains(Point.init(x, y))) {
+                    // Lines of text: three rows of each twelve are dark, inside a margin.
+                    const text = fx > 350 and fx < 510 and fy > 140 and fy < 360 and @mod(fy, 12) < 3;
+                    return .{ if (text) text_luma else wall_luma, true };
+                }
+                if (fx > 560 and fy > 400) return .{ hand_luma, false };
+                if (fx < 220) return .{ wall_luma, false };
+                if (fx < 224) return .{ line_luma, false };
+                return .{ floor_luma, false };
+            }
+        };
+        for (0..height) |y| {
+            for (0..width) |x| {
+                buffer[y * width + x] = Paint.at(page, unit, @floatFromInt(x), @floatFromInt(y))[0];
+            }
+        }
+        for (0..height / 2) |y| {
+            for (0..chroma_width) |x| {
+                const on_page = Paint.at(page, unit, @floatFromInt(2 * x), @floatFromInt(2 * y))[1];
+                buffer[luma_size + y * chroma_width + x] = if (on_page) cream_u else neutral;
+                buffer[luma_size + chroma_size + y * chroma_width + x] = if (on_page) cream_v else neutral;
+            }
+        }
+        return .{
+            .buffer = buffer,
+            .view = image.FrameView.fromPacked(buffer, @intCast(width), @intCast(height), .{}),
+            .page = page,
+        };
+    }
+
+    fn deinit(self: BrightRoom) void {
+        testing.allocator.free(self.buffer);
+    }
+};
+
+test "a region inside the frame is more like a sheet of paper than a region on its border" {
+    const mask = try Plane.initFilled(testing.allocator, 60, 40, 0);
+    defer mask.deinit(testing.allocator);
+    // A rectangle inside the frame.
+    for (10..30) |y| {
+        for (15..45) |x| mask.set(x, y, raster.mask_set);
+    }
+    const inside = (try raster.largestRegion(testing.allocator, mask)).?;
+    defer inside.deinit(testing.allocator);
+    try testing.expect(try paperLikeness(testing.allocator, inside) > 0.9);
+
+    // The left half of the frame: three of its four sides are the frame border.
+    @memset(mask.data, 0);
+    for (0..40) |y| {
+        for (0..30) |x| mask.set(x, y, raster.mask_set);
+    }
+    const on_border = (try raster.largestRegion(testing.allocator, mask)).?;
+    defer on_border.deinit(testing.allocator);
+    try testing.expectEqual(@as(f32, 0), try paperLikeness(testing.allocator, on_border));
+
+    // A rectangle with a bite out of it, as a hand on the paper makes it.
+    @memset(mask.data, 0);
+    for (10..30) |y| {
+        for (15..45) |x| {
+            if (y >= 20 and x >= 25 and x < 40) continue;
+            mask.set(x, y, raster.mask_set);
+        }
+    }
+    const bitten = (try raster.largestRegion(testing.allocator, mask)).?;
+    defer bitten.deinit(testing.allocator);
+    const likeness = try paperLikeness(testing.allocator, bitten);
+    try testing.expect(likeness > 0.6 and likeness < 0.85);
+}
+
+test "a book on a floor as bright as its page is found by its outline" {
+    const room = try BrightRoom.init(1);
+    defer room.deinit();
+
+    // The bright region alone is the wall, the floor, and the page together.
+    const bright = (try analyzeScene(testing.allocator, room.view, .{ .layout = .single, .outline_search = false })).?;
+    defer bright.deinit(testing.allocator);
+    try testing.expect(bright.region.touches_border);
+    try testing.expect(bright.region.area > 3 * 200 * 280 / 4);
+
+    const scene = (try analyzeScene(testing.allocator, room.view, .{ .layout = .single })).?;
+    defer scene.deinit(testing.allocator);
+    try testing.expect(!scene.region.touches_border);
+    try testing.expectEqual(@as(f32, 1), scene.outline_step);
+    const layout = (try detectLayout(testing.allocator, &scene, .{ .layout = .single })).?;
+    try testing.expectEqual(LayoutKind.single, layout.kind);
+    try testing.expect(!layout.clipped);
+    const tolerance = 4.0;
+    try expectPointNear(room.page.tl, layout.pages[0].tl, tolerance);
+    try expectPointNear(room.page.tr, layout.pages[0].tr, tolerance);
+    try expectPointNear(room.page.br, layout.pages[0].br, tolerance);
+    try expectPointNear(room.page.bl, layout.pages[0].bl, tolerance);
+}
+
+test "the outline search works on a smaller image for a large frame" {
+    // A frame of 1280 x 960 pixels: its half-size image is wider than the working size.
+    const room = try BrightRoom.init(2);
+    defer room.deinit();
+    const scene = (try analyzeScene(testing.allocator, room.view, .{ .layout = .single })).?;
+    defer scene.deinit(testing.allocator);
+    try testing.expectEqual(@as(f32, 2), scene.outline_step);
+    const layout = (try detectLayout(testing.allocator, &scene, .{ .layout = .single })).?;
+    // The outline has steps of two pixels of the half-size image: four of the frame.
+    const tolerance = 8.0;
+    try expectPointNear(room.page.tl, layout.pages[0].tl, tolerance);
+    try expectPointNear(room.page.br, layout.pages[0].br, tolerance);
+}
+
+test "the outline search frees its memory when an allocation fails" {
+    const room = try BrightRoom.init(1);
+    defer room.deinit();
+    const Run = struct {
+        fn run(allocator: Allocator, frame: image.FrameView) !void {
+            const scene = (try analyzeScene(allocator, frame, .{ .layout = .single })) orelse return error.NoScene;
+            defer scene.deinit(allocator);
+            if (scene.region.touches_border) return error.OutlineNotUsed;
+        }
+    };
+    try alloc_check.eachFailure(testing.allocator, Run.run, .{room.view});
 }
 
 test "a frame without paper has no scene" {

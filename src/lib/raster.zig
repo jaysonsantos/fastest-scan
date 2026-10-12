@@ -170,6 +170,51 @@ pub fn dilate3(allocator: Allocator, mask: Plane) Allocator.Error!Plane {
 
 // region: connected regions
 
+/// The pixels that a flood from the border of the plane reaches. A pixel with a
+/// value that is not 0 is a wall: the flood does not cross it. The flood moves
+/// across the four sides of a pixel, not across its corners, so a wall with a
+/// width of one pixel holds also when it runs at an angle.
+///
+/// The result has `mask_set` for each pixel that the flood reached.
+pub fn floodFromBorder(allocator: Allocator, walls: Plane) Allocator.Error!Plane {
+    const width: usize = walls.width;
+    const height: usize = walls.height;
+    const reached = try Plane.initFilled(allocator, walls.width, walls.height, 0);
+    errdefer reached.deinit(allocator);
+    if (width == 0 or height == 0) return reached;
+    const stack = try allocator.alloc(u32, width * height);
+    defer allocator.free(stack);
+    var stack_len: usize = 0;
+
+    const Flood = struct {
+        fn enter(wall_data: []const u8, reached_data: []u8, items: []u32, len: *usize, index: usize) void {
+            if (wall_data[index] != 0 or reached_data[index] != 0) return;
+            reached_data[index] = mask_set;
+            items[len.*] = @intCast(index);
+            len.* += 1;
+        }
+    };
+    for (0..width) |x| {
+        Flood.enter(walls.data, reached.data, stack, &stack_len, x);
+        Flood.enter(walls.data, reached.data, stack, &stack_len, (height - 1) * width + x);
+    }
+    for (0..height) |y| {
+        Flood.enter(walls.data, reached.data, stack, &stack_len, y * width);
+        Flood.enter(walls.data, reached.data, stack, &stack_len, y * width + width - 1);
+    }
+    while (stack_len > 0) {
+        stack_len -= 1;
+        const index: usize = stack[stack_len];
+        const x = index % width;
+        const y = index / width;
+        if (x > 0) Flood.enter(walls.data, reached.data, stack, &stack_len, index - 1);
+        if (x + 1 < width) Flood.enter(walls.data, reached.data, stack, &stack_len, index + 1);
+        if (y > 0) Flood.enter(walls.data, reached.data, stack, &stack_len, index - width);
+        if (y + 1 < height) Flood.enter(walls.data, reached.data, stack, &stack_len, index + width);
+    }
+    return reached;
+}
+
 pub const Region = struct {
     /// `mask_set` for each pixel of the region.
     mask: Plane,
@@ -340,6 +385,56 @@ test "largestRegion picks the bigger of two groups" {
     try testing.expectEqual(@as(u32, 2), region.min_y);
     try testing.expect(region.touches_border);
     try testing.expectEqual(@as(u8, 0), region.mask.at(0, 0));
+}
+
+test "a flood from the border stops at a closed wall and enters an open one" {
+    const width = 9;
+    const height = 7;
+    const walls = try Plane.initFilled(testing.allocator, width, height, 0);
+    defer walls.deinit(testing.allocator);
+    // A closed box, with its inside at x 3..5 and y 2..4.
+    for (2..7) |x| {
+        walls.set(x, 1, mask_set);
+        walls.set(x, 5, mask_set);
+    }
+    for (1..6) |y| {
+        walls.set(2, y, mask_set);
+        walls.set(6, y, mask_set);
+    }
+    const closed = try floodFromBorder(testing.allocator, walls);
+    defer closed.deinit(testing.allocator);
+    try testing.expectEqual(@as(u8, mask_set), closed.at(0, 0));
+    try testing.expectEqual(@as(u8, mask_set), closed.at(8, 3));
+    try testing.expectEqual(@as(u8, 0), closed.at(4, 3));
+    // A wall is not reached.
+    try testing.expectEqual(@as(u8, 0), closed.at(2, 3));
+
+    // One gap in the wall lets the flood in.
+    walls.set(6, 3, 0);
+    const open = try floodFromBorder(testing.allocator, walls);
+    defer open.deinit(testing.allocator);
+    try testing.expectEqual(@as(u8, mask_set), open.at(4, 3));
+}
+
+test "a flood does not cross a wall at an angle" {
+    const size = 8;
+    const walls = try Plane.initFilled(testing.allocator, size, size, 0);
+    defer walls.deinit(testing.allocator);
+    // A wall of one pixel from corner to corner: the two sides touch only at corners.
+    for (0..size) |index| walls.set(index, index, mask_set);
+    // The frame border is a wall too, except one pixel on the left side.
+    for (0..size) |index| {
+        walls.set(index, 0, mask_set);
+        walls.set(index, size - 1, mask_set);
+        walls.set(0, index, mask_set);
+        walls.set(size - 1, index, mask_set);
+    }
+    walls.set(0, 4, 0);
+    const reached = try floodFromBorder(testing.allocator, walls);
+    defer reached.deinit(testing.allocator);
+    // Below the wall: reached. Above it: not reached.
+    try testing.expectEqual(@as(u8, mask_set), reached.at(2, 5));
+    try testing.expectEqual(@as(u8, 0), reached.at(5, 2));
 }
 
 test "largestRegion of an empty mask is null" {

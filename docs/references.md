@@ -37,6 +37,8 @@ Rules:
 | Y. Arai, T. Agui, and M. Nakajima, "A fast DCT-SQ scheme for images", Transactions of the IEICE E71(11), 1988 | `src/lib/jpeg.zig`, `forwardDct` | The fast forward DCT |
 | Independent JPEG Group, libjpeg (T. G. Lane and others), IJG license | `src/lib/jpeg.zig` | The float form of the fast DCT (`jfdctflt.c`), the quality scale (`jcparam.c`), the order of the Huffman table steps (`jchuff.c`). The code here is written new in Zig. This software is based in part on the work of the Independent JPEG Group. |
 | E. Hamilton, "JPEG File Interchange Format, version 1.02", C-Cube Microsystems, 1992 | `src/lib/jpeg.zig` | The JFIF header and the YCbCr conversion |
+| J.-C. Burie, J. Chazalon, M. Coustaty, S. Eskenazi, M. M. Luqman, M. Mehri, N. Nayef, J.-M. Ogier, S. Prum, and M. Rusiñol, "ICDAR2015 Competition on Smartphone Document Capture and OCR (SmartDoc)", ICDAR 2015, pp. 1161-1165: the method of E. Carlinet and T. Géraud (LRDE) | `src/lib/detect.zig`, `analyzeScene` and `paperLikeness` | The idea to take, among several shapes of a frame, the shape most like a sheet of paper. Their shapes come from the tree of shapes; the code here has two shapes only: the bright region, and the region inside the outline (decision 0024). |
+| I. Sobel and G. Feldman, "A 3x3 isotropic gradient operator for image processing", a talk at the Stanford Artificial Intelligence Project, 1968 | `src/lib/detect.zig`, `addStepStrength` | The gradient of a plane, for the outline of a book |
 | ISO 32000-1:2008, "Document management - Portable document format - Part 1: PDF 1.7" | `src/lib/pdf.zig` | The PDF file structure |
 | ITU-R Recommendations BT.709 and BT.601 | `src/lib/color.zig` | The YUV to RGB matrices and code ranges |
 | FFmpeg, <https://ffmpeg.org>, LGPL/GPL | `src/cli/ffmpeg.zig` | The CLI starts the `ffmpeg` and `ffprobe` programs. No FFmpeg code is in this repository. |
@@ -47,6 +49,7 @@ These sources shaped a design. The project uses none of their code.
 
 | Source | Idea |
 |---|---|
+| J. Matas, O. Chum, M. Urban, and T. Pajdla, "Robust wide-baseline stereo from maximally stable extremal regions", BMVC 2002 | The regions above each of several thresholds as candidates for the paper. `prototypes/detect/region_search.py` tried this for a book on a bright surface; it finds only the part of a page in the light, so it did not go into the Zig code (decision 0024). |
 | ScanTailor by J. Artsimovich, GPL-3, <https://github.com/scantailor/scantailor> | A spread splits at a near-vertical line near its middle (`filters/page_split`). The fold search in `src/lib/detect.zig` has its own response and search. Also: a polynomial surface as the paper background, with dark cells rejected (`EstimateBackground`), in `src/lib/enhance.zig`. |
 
 ## Data for checks

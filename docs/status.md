@@ -79,6 +79,7 @@ finger is lost: `--fingers blank` and `--fingers keep` change the rule.
 | `pdf.zig`: PDF writer with a byte callback | Done, tested. `pdfinfo` reads the file. |
 | `raster.zig`: halving, histogram, Otsu, 3x3 morphology, largest region | Done, tested |
 | `detect.zig`: paper mask, edge lines, fold of a spread, page quads, clipped edges | Works on stable frames of the benchmark. Tests use synthetic frames. |
+| `detect.zig`: the outline search for a book on a surface as bright as its pages (decision 0024) | Works on one phone video of a bright room: the pages of the PDF are pages of the book. The benchmark keeps the same bytes. Not for a page that runs out of the frame. |
 | `observe.zig`: page thumbnail, covered cells, frame similarity | Done, tested |
 | `timeline.zig`: stable runs of frames, one reference frame per spread | Works, but splits some spreads in two |
 | `document.zig`: one page size for all pages | Done, tested |
@@ -209,15 +210,15 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
 
 ## Known problems
 
-- **A bright surface around the book gives wrong pages.** The page detector takes
-  the largest bright region of the frame for the paper (decision 0004). In a
-  video of 2026-10-12 from the phone (a paperback on a light grey floor, next to
-  a white wall, 1920 x 1080), the wall is the "page" of the cover, and the wall
-  and the floor are the two "pages" of each spread. The two passes, the stream
-  mode, and the app on the phone all give such a PDF: 18 pages on the desktop
-  and 14 on the phone, none of them a page of the book. Until the detector is
-  better, film on a dark, plain surface, with the book as large as the frame
-  allows. The difference between 18 and 14 pages is not explained.
+- **A bright surface around the book, and a page that runs out of the frame.**
+  The outline search of decision 0024 finds a book on a bright surface only when
+  the whole book is inside the frame. When a page runs out of the frame there,
+  the detector takes the bright surface for the paper, as before that decision.
+- **Fast page turns with the hands on the book lose spreads.** In the phone
+  video of 2026-10-12 (a paperback on a light grey floor, 49 seconds, 1920 x
+  1080), the result has 7 pages: the cover and three spreads. The video shows
+  more spreads. The timeline wants a stable view of 0.3 seconds with at most a
+  quarter of a page covered, and the user gave it only for some spreads.
 - **A small book in a 1920 x 1080 frame gives small pages.** In that video a page
   is about 350 pixels wide. The benchmark has 3840 x 2160 pixels and a page of
   1292 pixels.

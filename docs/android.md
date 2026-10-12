@@ -177,9 +177,10 @@ memory: no run with smaller settings was made on a phone.
 
 ## Limits
 
-- The book must lie on a dark, plain surface. With a bright surface around the
-  book, the page detector of the library takes the surface for a page:
-  `docs/status.md`, "Known problems".
+- The whole book must be inside the frame. On a dark surface a page can run out
+  of the frame; on a bright surface it must not (decision 0024).
+- The detector wants a stable view of each spread for 0.3 seconds, with the
+  hands off most of the page.
 - The video must have 8 bits per sample. A video with 10 bits (HDR) is not supported.
 - The camera source asks for frames of 3840 x 2160 pixels and takes the nearest
   size that the phone gives. With smaller frames, the pages have fewer pixels.

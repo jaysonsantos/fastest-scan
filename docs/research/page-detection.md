@@ -113,3 +113,12 @@ The agent read sources 1, 2, 3, and 6 as full text. It read the patents (8, 10),
 blog posts (4, 5, 7), and source 9 through a page summariser. It did not read the
 SmartDoc-2015 report; those numbers come from sources 2 and 3. `paper-notes.md` has
 notes on the report itself.
+
+## Update, 2026-10-12: a book on a bright surface
+
+The paper mask fails when the surface around the book is as bright as its pages.
+Decision 0024 adds a search for the outline of the book: a flood from the frame
+border that stops at steps of luma and chroma. `prototypes/detect/` has the two
+experiments, and the decision record has the numbers. The tree of shapes and the
+line-segment detectors of this page stay options for a page that runs out of the
+frame.
