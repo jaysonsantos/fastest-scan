@@ -88,8 +88,17 @@ pub const Options = struct {
     /// Skin has no texture: the luma in a cell changes by this much at most.
     max_cell_contrast: f32 = 0.35,
     /// A finger is a wide blob: somewhere it has skin in all cells within this
-    /// distance, in cells. A thin strip of the desk at the edge of the page does not.
+    /// distance, in cells. A thin dark thing at the edge of the page does not: the
+    /// end of a header bar with a tint, or the wood of the desk in a shadow.
     core_cells: u8 = 2,
+    /// For skin in the light, the distance is this value. The tip of a thumb at the
+    /// edge of the page is a thin blob, and it is in the light.
+    lit_core_cells: u8 = 1,
+    /// Skin is in the light when the mean luma of the cell is this or more. The
+    /// end of a header bar with weak glare on it has the colour of skin too, and
+    /// it is a thin blob at the border of the page, but it is darker: 0.25 to
+    /// 0.4. The thumb tips of the benchmark video have 0.65 to 0.8.
+    lit_luma: f32 = 0.45,
     /// The mask of a finger covers this many cells more: a finger has a soft edge.
     margin_cells: u8 = 3,
 
@@ -161,6 +170,7 @@ pub const Options = struct {
         // The sizes of the result are final: a second call changes nothing.
         sized.reference_page_width = 0;
         sized.core_cells = scaledSize(u8, self.core_cells, scale);
+        sized.lit_core_cells = scaledSize(u8, self.lit_core_cells, scale);
         sized.margin_cells = scaledSize(u8, self.margin_cells, scale);
         sized.halo_cells = scaledSize(u8, self.halo_cells, scale);
         sized.edge_cells = scaledSize(u8, self.edge_cells, scale);
@@ -441,6 +451,8 @@ pub fn find(
     errdefer allocator.free(covered);
     const halo = try allocator.alloc(bool, count);
     defer allocator.free(halo);
+    const lit = try allocator.alloc(bool, count);
+    defer allocator.free(lit);
     const scratch = try allocator.alloc(bool, count);
     defer allocator.free(scratch);
 
@@ -453,7 +465,12 @@ pub fn find(
     // its width where the frame cuts it.
     for (finger, skin, no_data) |*value, is_skin, missing| value.* = is_skin or missing;
     erode(finger, scratch, grid, options.core_cells);
-    for (finger, no_data) |*value, missing| value.* = value.* and !missing;
+    // Skin in the light can be a thinner blob.
+    for (lit, skin, colors.mean, no_data) |*value, is_skin, mean, missing| {
+        value.* = missing or (is_skin and color.rgbLuma(mean) >= options.lit_luma);
+    }
+    erode(lit, scratch, grid, options.lit_core_cells);
+    for (finger, lit, no_data) |*value, is_lit, missing| value.* = (value.* or is_lit) and !missing;
     // One cell more than the way back: the blob gets its round ends again, and the
     // skin mask limits it.
     dilate(finger, scratch, grid, @as(usize, options.core_cells) + 1, skin);
@@ -1009,12 +1026,13 @@ test "the sizes in cells follow the width of the page" {
     try testing.expectEqual(fixed, fixed.forGrid(.{ .width = 20, .height = 25, .cell = 8 }));
 }
 
-test "on a small page, a thin finger is a finger" {
+test "on a small page, a thin finger with a dark skin tone is a finger" {
     const page = try testPage(testing.allocator);
     defer page.deinit(testing.allocator);
     // A finger of 3 cells in width. On the page of the benchmark video, which is
-    // 4 times as wide, a finger of the same part of the page has 12 cells.
-    fill(page, 0, 80, 200, 224, test_skin);
+    // 4 times as wide, a finger of the same part of the page has 12 cells. Dark
+    // skin needs the wide blob of `core_cells`.
+    fill(page, 0, 80, 200, 224, test_dark_skin);
     const grid = Grid.init(page, test_cell);
     const no_data = try testing.allocator.alloc(bool, grid.count());
     defer testing.allocator.free(no_data);
@@ -1032,14 +1050,39 @@ test "on a small page, a thin finger is a finger" {
     try testing.expect(!fixed.finger[cellAt(page, 40, 212)]);
 }
 
-test "a thin strip of the desk at the edge of the page is not a finger" {
+test "a thin dark strip at the edge of the page is not a finger" {
     const page = try testPage(testing.allocator);
     defer page.deinit(testing.allocator);
-    fill(page, 0, 320, 384, 400, test_skin);
+    // The wood of the desk in a shadow, or the end of a header bar with a tint:
+    // 2 cells thick, with the colour of dark skin.
+    fill(page, 0, 320, 384, 400, test_dark_skin);
 
     const mask = try testFind(page, null);
     defer mask.deinit(testing.allocator);
     try testing.expect(mask.skin[cellAt(page, 160, 392)]);
+    for (mask.finger) |is_finger| try testing.expect(!is_finger);
+}
+
+test "the tip of a thumb at the edge of the page is a finger" {
+    const page = try testPage(testing.allocator);
+    defer page.deinit(testing.allocator);
+    // Skin in the light, 2 cells thick: too thin for a wide blob.
+    fill(page, 120, 200, 384, 400, test_skin);
+
+    const mask = try testFind(page, null);
+    defer mask.deinit(testing.allocator);
+    try testing.expect(mask.finger[cellAt(page, 160, 392)]);
+    try testing.expect(mask.covered[cellAt(page, 160, 370)]);
+}
+
+test "a line of skin colour of one cell at the edge of the page is not a finger" {
+    const page = try testPage(testing.allocator);
+    defer page.deinit(testing.allocator);
+    fill(page, 0, 320, 392, 400, test_skin);
+
+    const mask = try testFind(page, null);
+    defer mask.deinit(testing.allocator);
+    try testing.expect(mask.skin[cellAt(page, 160, 396)]);
     for (mask.finger) |is_finger| try testing.expect(!is_finger);
 }
 
