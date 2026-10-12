@@ -229,7 +229,11 @@ pub fn analyze(io: Io, gpa: Allocator, config: *const args.Config, info: *const 
             } else {
                 file.close(io);
             }
-        } else |_| {}
+        } else |err| switch (err) {
+            // No marker: the cache file is new or not complete.
+            error.FileNotFound => {},
+            else => |passed| return passed,
+        }
         if (!cache_complete) {
             const file = try dir.createFile(io, cache_name, .{ .read = true, .truncate = true });
             try file.setLength(io, expected_bytes);
@@ -384,10 +388,18 @@ pub fn writeTimelineDebug(
 
     // The pictures need the analysis frames of the cache.
     const cache_path = config.cache_dir orelse return;
-    const cache_dir = Io.Dir.cwd().openDir(io, cache_path, .{}) catch return;
+    // The pictures of the segments come from the analysis cache. With no cache,
+    // this debug output has no pictures.
+    const cache_dir = Io.Dir.cwd().openDir(io, cache_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => |passed| return passed,
+    };
     defer cache_dir.close(io);
     var name_buffer: [96]u8 = undefined;
-    const cache_file = cache_dir.openFile(io, try analysisCacheName(&name_buffer, analysis.size, info.frames.len), .{}) catch return;
+    const cache_file = cache_dir.openFile(io, try analysisCacheName(&name_buffer, analysis.size, info.frames.len), .{}) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => |passed| return passed,
+    };
     defer cache_file.close(io);
 
     try dir.createDirPath(io, debug_segments_dir);
@@ -564,7 +576,11 @@ const FrameStore = struct {
         var name_buffer: [64]u8 = undefined;
         if (self.cache_dir) |dir| {
             for (indexes, buffers, loaded) |frame_index, buffer, *done| {
-                const file = dir.openFile(self.io, try self.cacheName(&name_buffer, frame_index), .{}) catch continue;
+                const file = dir.openFile(self.io, try self.cacheName(&name_buffer, frame_index), .{}) catch |err| switch (err) {
+                    // The frame is not in the cache: a decoder gives it.
+                    error.FileNotFound => continue,
+                    else => |passed| return passed,
+                };
                 defer file.close(self.io);
                 done.* = (try file.readPositionalAll(self.io, buffer, 0)) == buffer.len;
             }

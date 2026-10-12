@@ -26,7 +26,6 @@ pub fn main(init: std.process.Init) !u8 {
     var stdout_buffer: [stdout_buffer_bytes]u8 = undefined;
     var stdout_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
-    defer stdout.flush() catch {};
 
     const raw_arguments = try init.minimal.args.toSlice(arena);
     const arguments = try arena.alloc([]const u8, raw_arguments.len -| 1);
@@ -38,22 +37,24 @@ pub fn main(init: std.process.Init) !u8 {
         return exit_code.usage;
     };
     switch (action) {
-        .help => {
-            try stdout.writeAll(args.help_text);
-            return exit_code.ok;
-        },
-        .version => {
-            try stdout.print("fastest-scan {s}\n", .{fastscan.version});
-            return exit_code.ok;
-        },
-        .run => |config| {
-            run(init, &config, stdout) catch |err| {
-                std.debug.print("error: {t}\n", .{err});
-                return exit_code.failed;
-            };
-            return exit_code.ok;
+        .help => try stdout.writeAll(args.help_text),
+        .version => try stdout.print("fastest-scan {s}\n", .{fastscan.version}),
+        .run => |config| run(init, &config, stdout) catch |err| {
+            std.debug.print("error: {t}\n", .{err});
+            return exit_code.failed;
         },
     }
+    // A flush that fails is an error of the program: its last line did not go out.
+    stdout.flush() catch |err| {
+        // The writer interface gives a general error; the file writer keeps the cause.
+        if (stdout_writer.err) |cause| {
+            std.debug.print("error: cannot write to the standard output: {t}\n", .{cause});
+        } else {
+            std.debug.print("error: cannot write to the standard output: {t}\n", .{err});
+        }
+        return exit_code.failed;
+    };
+    return exit_code.ok;
 }
 
 fn lookupEnvironment(context: ?*const anyopaque, name: []const u8) ?[]const u8 {

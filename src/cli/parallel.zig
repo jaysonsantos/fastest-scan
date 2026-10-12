@@ -43,13 +43,18 @@ pub fn forEach(
     var group: Io.Group = .init;
     const extra_workers = @max(1, @min(worker_count, job_count)) - 1;
     for (0..extra_workers) |extra| {
-        // When the system gives no more threads, the calling thread does the rest.
-        group.concurrent(io, Shared.work, .{ &shared, extra + 1 }) catch break;
+        group.concurrent(io, Shared.work, .{ &shared, extra + 1 }) catch |err| switch (err) {
+            // The system gives no more threads: the calling thread does the rest.
+            error.ConcurrencyUnavailable => break,
+        };
     }
     // The calling thread is worker 0.
     shared.work(0);
-    group.await(io) catch {};
+    // A request to cancel comes back as the error of the wait. The error of a job
+    // comes first: it says more.
+    const awaited = group.await(io);
     if (shared.first_error) |err| return err;
+    try awaited;
 }
 
 const testing = std.testing;

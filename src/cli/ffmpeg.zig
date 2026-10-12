@@ -28,6 +28,8 @@ const probe_key = struct {
 // endregion: constants
 
 pub const Error = error{
+    /// The system has no program with the name of `ffprobe` or `ffmpeg`.
+    ToolNotFound,
     /// `ffprobe` or `ffmpeg` did not start, or ended with an error.
     ToolFailed,
     /// The output of `ffprobe` has no video stream or misses a property.
@@ -79,24 +81,58 @@ pub const VideoInfo = struct {
     }
 };
 
-/// Run a program and return all of its standard output.
-fn capture(io: Io, allocator: Allocator, argv: []const []const u8) ![]u8 {
-    var child = std.process.spawn(io, .{
+/// Start `ffmpeg` or `ffprobe` with its standard output in a pipe. The message
+/// names the program: the user must see which tool is missing, and why a tool did
+/// not start.
+fn startTool(io: Io, argv: []const []const u8) (Error || Allocator.Error || Io.Cancelable)!std.process.Child {
+    return std.process.spawn(io, .{
         .argv = argv,
         .stdin = .ignore,
         .stdout = .pipe,
         .stderr = .inherit,
-    }) catch return error.ToolFailed;
+    }) catch |err| switch (err) {
+        error.OutOfMemory, error.Canceled => |passed| return passed,
+        error.FileNotFound => {
+            std.debug.print("cannot find the program '{s}'\n", .{argv[0]});
+            return error.ToolNotFound;
+        },
+        else => {
+            std.debug.print("cannot start the program '{s}': {t}\n", .{ argv[0], err });
+            return error.ToolFailed;
+        },
+    };
+}
+
+/// The error for a read from the pipe of a tool that failed. The reader interface
+/// gives a general error only; the reader keeps the cause.
+fn readError(reader: *const Io.File.Reader) (Error || Io.Cancelable) {
+    const cause = reader.err orelse return error.ToolFailed;
+    if (cause == error.Canceled) return error.Canceled;
+    std.debug.print("cannot read the output of the tool: {t}\n", .{cause});
+    return error.ToolFailed;
+}
+
+/// Run a program and return all of its standard output. The caller frees it.
+fn capture(io: Io, allocator: Allocator, argv: []const []const u8) (Error || Allocator.Error || Io.Cancelable)![]u8 {
+    var child = try startTool(io, argv);
     defer child.kill(io);
 
     var buffer: [pipe_buffer_bytes]u8 = undefined;
     var reader = child.stdout.?.readerStreaming(io, &buffer);
     const output = reader.interface.allocRemaining(allocator, .unlimited) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return error.ToolFailed,
+        error.ReadFailed => return readError(&reader),
+        // The limit is `.unlimited`.
+        error.StreamTooLong => unreachable,
     };
     errdefer allocator.free(output);
-    const term = child.wait(io) catch return error.ToolFailed;
+    const term = child.wait(io) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => {
+            std.debug.print("cannot wait for the program '{s}': {t}\n", .{ argv[0], err });
+            return error.ToolFailed;
+        },
+    };
     if (!term.success()) return error.ToolFailed;
     return output;
 }
@@ -295,12 +331,7 @@ pub const FrameReader = struct {
         self.* = .{
             .io = io,
             .allocator = allocator,
-            .child = std.process.spawn(io, .{
-                .argv = argv.items,
-                .stdin = .ignore,
-                .stdout = .pipe,
-                .stderr = .inherit,
-            }) catch return error.ToolFailed,
+            .child = try startTool(io, argv.items),
             .pipe_buffer = pipe_buffer,
             .file_reader = undefined,
             .frame = frame,
@@ -315,9 +346,9 @@ pub const FrameReader = struct {
 
     /// The next frame, or null after the last frame of the range. The view is valid
     /// until the next call.
-    pub fn next(self: *FrameReader) Error!?image.FrameView {
+    pub fn next(self: *FrameReader) (Error || Io.Cancelable)!?image.FrameView {
         if (self.remaining == 0) return null;
-        const count = self.file_reader.interface.readSliceShort(self.frame) catch return error.ToolFailed;
+        const count = self.file_reader.interface.readSliceShort(self.frame) catch return readError(&self.file_reader);
         if (count == 0) return null;
         if (count != self.frame.len) {
             std.debug.print("ffmpeg gave {d} bytes of a frame of {d} bytes, with {d} frames to go\n", .{ count, self.frame.len, self.remaining });
