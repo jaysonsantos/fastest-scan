@@ -195,7 +195,10 @@ memory: no run with smaller settings was made on a phone.
 ## Limits
 
 - The whole book must be inside the frame. On a dark surface a page can run out
-  of the frame; on a bright surface it must not (decision 0024).
+  of the frame; on a bright surface it must not (decisions 0024 and 0026).
+- On a bright desk, the paper must have another colour than the desk: cream
+  paper on a white desk is found, white paper on a desk of the same white is
+  not (decision 0026).
 - The detector wants a stable view of each spread for 0.3 seconds, with the
   hands off most of the page.
 - The video must have 8 bits per sample. A video with 10 bits (HDR) is not supported.

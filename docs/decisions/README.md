@@ -31,3 +31,4 @@ replaces it and name the old file in the new one.
 | [0023](0023-no-decoder-cost-in-the-donor-choice.md) | The donor choice has no decoder cost |
 | [0024](0024-outline-search-for-bright-surroundings.md) | The detector finds a book on a bright surface by its outline |
 | [0025](0025-halo-reach-and-rim.md) | The halo of a finger reaches farther, and its rim belongs to the mask |
+| [0026](0026-line-search-for-a-page-on-a-bright-desk.md) | The detector finds a page on a bright desk by its four straight edges |

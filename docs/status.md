@@ -80,6 +80,7 @@ finger is lost: `--fingers blank` and `--fingers keep` change the rule.
 | `raster.zig`: halving, histogram, Otsu, 3x3 morphology, largest region | Done, tested |
 | `detect.zig`: paper mask, edge lines, fold of a spread, page quads, clipped edges | Works on stable frames of the benchmark. Tests use synthetic frames. |
 | `detect.zig`: the outline search for a book on a surface as bright as its pages (decision 0024) | Works on one phone video of a bright room: the pages of the PDF are pages of the book, on the desktop and in the app on the phone. The benchmark keeps the same bytes. Not for a page that runs out of the frame. |
+| `lines.zig`, and the line search of `detect.zig`: a page on a bright desk by its four straight edges (decision 0026) | Works on one recording of a white desk with a wood grain and things around the book: the detector finds the page in all its frames. 12 other videos keep the same bytes of the PDF. Not for a page that runs out of the frame, and not for white paper on a desk of the same white. |
 | `observe.zig`: page thumbnail, covered cells, frame similarity | Done, tested |
 | `timeline.zig`: stable runs of frames, one reference frame per spread | Works, but splits some spreads in two |
 | `document.zig`: one page size for all pages | Done, tested |
@@ -171,9 +172,11 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
      them, and the page count is wrong on most: for example 7 pages where the
      true number of page views is 17. The desk is bright, the videos have 480 x
      270 pixels, and many books lie in a second direction. Decision 0018 has the
-     commands to get the videos.
-   - Hough or line-segment detector for low-contrast desks, with the quad of the
-     frame before as a prior (the best SmartDoc 2015 methods do this).
+     commands to get the videos. With the outline search of decision 0024 the
+     counts are too high: see "Known problems".
+   - The detector with lines for low-contrast desks is done in a first form
+     (decision 0026). What is left: the quad of the frame before as a prior (the
+     best SmartDoc 2015 methods do this), and a page that runs out of the frame.
 7. `scripts/bench.sh` prints the page count, the time, the size, and OCR numbers.
    Missing: a sharpness number and a glare area number.
 8. **The code against the conventions of the Zig standard library.** A check on
@@ -191,13 +194,13 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
    - No list reserves its capacity, and `pdf.Writer` keeps its allocator.
    - The tests that make each allocation fail (`alloc_check.eachFailure`)
      cover the entry points that the CLI calls. They found no more memory that
-     stays. `detect.zig` has such a test for the outline search only: the tests
-     of `observe.zig` and `render.zig` run the other parts of it.
+     stays. `detect.zig` has such a test for the outline search and for the
+     line search only: the tests of `observe.zig` and `render.zig` run the other
+     parts of it.
 9. **The Android app** (decision 0019, `docs/android.md`). The app scans a
    recorded video on a phone. With the camera, the app runs, the screen turns
-   with the phone, and the frames have 2880 x 2160 pixels. A scan with the
-   camera gives no good document yet: see "Known problems". What is left, in
-   this order:
+   with the phone, and the frames have 2880 x 2160 pixels. No scan of a whole
+   book with the camera is verified yet. What is left, in this order:
    - Scan a real book with the camera of the phone. Check the frame rate that
      CameraX gives, the colours, and the page outline on the preview.
    - Bring the memory down: 1.1 GB of native memory on the phone is much. Run
@@ -213,9 +216,19 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
 ## Known problems
 
 - **A bright surface around the book, and a page that runs out of the frame.**
-  The outline search of decision 0024 finds a book on a bright surface only when
-  the whole book is inside the frame. When a page runs out of the frame there,
-  the detector takes the bright surface for the paper, as before that decision.
+  The outline search of decision 0024 and the line search of decision 0026 find
+  a book on a bright surface only when the whole book is inside the frame. When
+  a page runs out of the frame there, the detector takes the bright surface for
+  the paper, as before those decisions.
+- **White paper on a desk of the same white.** The line search wants another
+  colour of the surface around the page. When the outline search fails there
+  too, the detector takes the desk for the paper.
+- **The PUCIT videos get too many pages since decision 0024.** The first eight
+  videos give 75, 45, 42, 55, 49, 18, 32, and 57 pages, where `main` gives 7, 4,
+  15, 4, 28, 9, 26, and 52, and a video has about 20 page views. The book is
+  larger than the frame there, and the outline search takes parts of a page for
+  the page. Its rule to accept a region is too loose for that case (decision
+  0026, "Limits").
 - **Fast page turns with the hands on the book lose spreads.** In the phone
   video of 2026-10-12 (a paperback on a light grey floor, 49 seconds, 1920 x
   1080), the result has 7 pages: the cover and three spreads. The video shows

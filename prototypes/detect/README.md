@@ -18,6 +18,20 @@ has the result.
   `detect.outlineRegion` in `src/lib/detect.zig` is this experiment in Zig:
   change the two together.
 
+`line_quads.py` looked on the same day for a page on a white desk with a wood
+grain and with things around the book, where the outline search fails.
+`docs/decisions/0026-line-search-for-a-page-on-a-bright-desk.md` has the result.
+
+- `line_quads.py`: the straight lines of the frame (a Hough transform with the
+  direction of the gradient), and then four lines that make a quad with a page
+  inside. It finds the page in all test frames of the desk. `lines.find` in
+  `src/lib/lines.zig` and `detect.lineRegion` in `src/lib/detect.zig` are this
+  experiment in Zig. The script is the experiment as it ran. The Zig code then
+  got more: a line has its distance from the middle of the frame and a vote
+  that is larger for the direction of the step, three sides of a page need
+  steps along 90 % of their length, and the surface around a page needs another
+  colour. The script imports `edge_flood.py`.
+
 ## What they need
 
 - `uv`, which gets Python with numpy, Pillow, and scipy from the header of each
@@ -33,6 +47,7 @@ has the result.
 ```sh
 uv run prototypes/detect/region_search.py out/detect/frames/*.png --out out/detect/regions
 uv run prototypes/detect/edge_flood.py out/detect/frames/*.png --out out/detect/flood
+uv run prototypes/detect/line_quads.py out/detect/frames/*.png --out out/detect/quads
 ```
 
 Each script writes one picture for each frame and prints one or two lines for

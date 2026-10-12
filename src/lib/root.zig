@@ -11,6 +11,7 @@ pub const image = @import("image.zig");
 pub const intake = @import("intake.zig");
 pub const color = @import("color.zig");
 pub const raster = @import("raster.zig");
+pub const lines = @import("lines.zig");
 pub const detect = @import("detect.zig");
 pub const observe = @import("observe.zig");
 pub const timeline = @import("timeline.zig");

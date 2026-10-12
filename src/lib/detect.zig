@@ -10,6 +10,7 @@ const Allocator = std.mem.Allocator;
 const geometry = @import("geometry.zig");
 const image = @import("image.zig");
 const raster = @import("raster.zig");
+const lines = @import("lines.zig");
 const curl = @import("curl.zig");
 
 const Point = geometry.Point;
@@ -57,6 +58,10 @@ pub const Options = struct {
     /// One code of chroma counts as this many codes of luma in that measure. Paper
     /// on a surface of the same brightness often differs in colour only.
     outline_chroma_gain: f32 = 3.0,
+    /// When the outline search finds no paper, look for a page by its four
+    /// straight edges: a desk with a texture, with things that touch the book, or
+    /// a page with a weak part in its outline (decision 0026).
+    line_search: bool = true,
     /// Width divided by height above which the paper can be a spread.
     spread_min_aspect: f32 = 1.12,
     /// The fold must lie within this fraction of the paper width from the middle.
@@ -278,15 +283,17 @@ pub fn analyzeScene(allocator: Allocator, frame: image.FrameView, options: Optio
         const likeness = try paperLikeness(allocator, region);
         if (likeness < options.good_likeness) {
             const planes: OutlinePlanes = .{ .luma = luma.view(), .u = frame.u, .v = frame.v, .width = width, .height = height };
-            if (try outlineRegion(allocator, planes, opened, options)) |found| {
-                var taken = false;
-                defer if (!taken) found.region.deinit(allocator);
-                const found_likeness = try paperLikeness(allocator, found.region);
-                if (found_likeness >= options.min_outline_likeness and found_likeness > likeness + options.likeness_margin) {
+            if (try stepField(allocator, planes, options)) |field| {
+                defer field.deinit(allocator);
+                var better = try betterRegion(allocator, try outlineRegion(allocator, field, opened, options), likeness, options);
+                if (better == null and options.line_search) {
+                    const paper: PaperMask = .{ .bright = opened, .u = frame.u, .v = frame.v };
+                    better = try betterRegion(allocator, try lineRegion(allocator, field, paper), likeness, options);
+                }
+                if (better) |found| {
                     region.deinit(allocator);
                     region = found.region;
                     outline_step = found.step;
-                    taken = true;
                 }
             }
         }
@@ -361,6 +368,95 @@ const OutlineRegion = struct {
     step: f32,
 };
 
+/// The region of a search when it is more like a sheet of paper than the bright
+/// region, which has the likeness `likeness`. Frees the region when it is not.
+fn betterRegion(allocator: Allocator, candidate: ?OutlineRegion, likeness: f32, options: Options) Allocator.Error!?OutlineRegion {
+    const found = candidate orelse return null;
+    errdefer found.region.deinit(allocator);
+    const found_likeness = try paperLikeness(allocator, found.region);
+    if (found_likeness >= options.min_outline_likeness and found_likeness > likeness + options.likeness_margin) return found;
+    found.region.deinit(allocator);
+    return null;
+}
+
+/// The steps of a frame at the working size of the outline search and of the line
+/// search.
+const StepField = struct {
+    width: u32,
+    height: u32,
+    /// One pixel of the field is `factor` x `factor` pixels of the planes.
+    factor: u32,
+    /// The strength of the step at each pixel, in codes for one pixel: the sum of
+    /// the three planes.
+    strength: []f32,
+    /// The sums over the three planes of the products of the two parts of the
+    /// gradient: across times across, across times down, and down times down.
+    /// They give the direction of a step that more than one plane has: see
+    /// `angle`.
+    across_across: []f32,
+    across_down: []f32,
+    down_down: []f32,
+
+    fn deinit(self: StepField, allocator: Allocator) void {
+        allocator.free(self.strength);
+        allocator.free(self.across_across);
+        allocator.free(self.across_down);
+        allocator.free(self.down_down);
+    }
+
+    /// The direction of the step of a pixel in whole degrees, 0 to 179: the
+    /// direction in which the three planes together change most. This is the
+    /// gradient of a multi-image of S. Di Zenzo, "A note on the gradient of a
+    /// multi-image", Computer Vision, Graphics, and Image Processing 33, 1986.
+    fn angle(self: StepField, index: usize) u8 {
+        const twice = std.math.atan2(2 * self.across_down[index], self.across_across[index] - self.down_down[index]);
+        const degrees = @mod(std.math.radiansToDegrees(0.5 * twice), lines.angle_count);
+        return @intCast(@as(u32, @intFromFloat(@round(degrees))) % lines.angle_count);
+    }
+};
+
+/// The steps of the three planes of a frame. Null for a frame that is too small.
+fn stepField(allocator: Allocator, planes: OutlinePlanes, options: Options) Allocator.Error!?StepField {
+    const factor: u32 = @max(1, (planes.width + outline_work_width - 1) / outline_work_width);
+    const width: u32 = planes.width / factor;
+    const height: u32 = planes.height / factor;
+    if (width < min_scene_side or height < min_scene_side) return null;
+    const pixel_count = @as(usize, width) * height;
+
+    const strength = try allocator.alloc(f32, pixel_count);
+    errdefer allocator.free(strength);
+    const across_across = try allocator.alloc(f32, pixel_count);
+    errdefer allocator.free(across_across);
+    const across_down = try allocator.alloc(f32, pixel_count);
+    errdefer allocator.free(across_down);
+    const down_down = try allocator.alloc(f32, pixel_count);
+    errdefer allocator.free(down_down);
+    const field: StepField = .{
+        .width = width,
+        .height = height,
+        .factor = factor,
+        .strength = strength,
+        .across_across = across_across,
+        .across_down = across_down,
+        .down_down = down_down,
+    };
+    @memset(strength, 0);
+    @memset(across_across, 0);
+    @memset(across_down, 0);
+    @memset(down_down, 0);
+    const sources = [_]struct { plane: PlaneView, gain: f32 }{
+        .{ .plane = planes.luma, .gain = 1 },
+        .{ .plane = planes.u, .gain = options.outline_chroma_gain },
+        .{ .plane = planes.v, .gain = options.outline_chroma_gain },
+    };
+    for (sources) |source| {
+        const small = try reducePlane(allocator, source.plane, width, height, factor);
+        defer small.deinit(allocator);
+        try addSteps(allocator, field, small, source.gain);
+    }
+    return field;
+}
+
 /// How much a region is like a sheet of paper that lies inside the frame, from 0
 /// to 1: the product of three parts. The region fills its convex hull (a hand on
 /// the paper takes a bite out of it). The hull fills the smallest rectangle
@@ -429,34 +525,18 @@ fn smallestRectangleArea(hull: []const Point) f32 {
 }
 
 /// Find the paper as the largest region that a flood from the frame border does
-/// not reach. `bright` is the paper mask of the frame: a hand on the book is
-/// inside the outline of the book, and it is not bright. Returns null when the
-/// flood leaves no region of the smallest size.
-fn outlineRegion(allocator: Allocator, planes: OutlinePlanes, bright: Plane, options: Options) Allocator.Error!?OutlineRegion {
-    const factor: u32 = @max(1, (planes.width + outline_work_width - 1) / outline_work_width);
-    const width: u32 = planes.width / factor;
-    const height: u32 = planes.height / factor;
-    if (width < min_scene_side or height < min_scene_side) return null;
+/// not reach. `field` has the steps of the frame. `bright` is the paper mask of
+/// the frame: a hand on the book is inside the outline of the book, and it is not
+/// bright. Returns null when the flood leaves no region of the smallest size.
+fn outlineRegion(allocator: Allocator, field: StepField, bright: Plane, options: Options) Allocator.Error!?OutlineRegion {
+    const factor = field.factor;
+    const width = field.width;
+    const height = field.height;
     const pixel_count = @as(usize, width) * height;
-
-    // The strength of the steps of the three planes.
-    const strength = try allocator.alloc(f32, pixel_count);
-    defer allocator.free(strength);
-    @memset(strength, 0);
-    const sources = [_]struct { plane: PlaneView, gain: f32 }{
-        .{ .plane = planes.luma, .gain = 1 },
-        .{ .plane = planes.u, .gain = options.outline_chroma_gain },
-        .{ .plane = planes.v, .gain = options.outline_chroma_gain },
-    };
-    for (sources) |source| {
-        const small = try reducePlane(allocator, source.plane, width, height, factor);
-        defer small.deinit(allocator);
-        try addStepStrength(allocator, strength, small, source.gain);
-    }
 
     const thin_walls = try Plane.init(allocator, width, height);
     defer thin_walls.deinit(allocator);
-    for (thin_walls.data, strength) |*wall, value| wall.* = if (value > options.outline_step) raster.mask_set else 0;
+    for (thin_walls.data, field.strength) |*wall, value| wall.* = if (value > options.outline_step) raster.mask_set else 0;
     // Thicker walls close the small gaps of an outline.
     const walls = try raster.dilate3(allocator, thin_walls);
     defer walls.deinit(allocator);
@@ -516,10 +596,10 @@ fn reducePlane(allocator: Allocator, source: PlaneView, width: u32, height: u32,
     return out;
 }
 
-/// Add the strength of the steps of a plane to `strength`: the length of the
-/// Sobel gradient after a 3x3 binomial blur, in codes for one pixel, times
-/// `gain`. A pixel outside the plane has the value of the nearest pixel inside.
-fn addStepStrength(allocator: Allocator, strength: []f32, plane: Plane, gain: f32) Allocator.Error!void {
+/// Add the steps of a plane to `field`: the Sobel gradient after a 3x3 binomial
+/// blur, in codes for one pixel, times `gain`. The strength is the length of the
+/// gradient. A pixel outside the plane has the value of the nearest pixel inside.
+fn addSteps(allocator: Allocator, field: StepField, plane: Plane, gain: f32) Allocator.Error!void {
     const width: usize = plane.width;
     const height: usize = plane.height;
     // The blur as a sum of 16 weights, with no division.
@@ -550,7 +630,11 @@ fn addStepStrength(allocator: Allocator, strength: []f32, plane: Plane, gain: f3
                 @as(i32, above[left]) - 2 * @as(i32, here[left]) - below[left]);
             const down: f32 = @floatFromInt(@as(i32, below[left]) + 2 * @as(i32, below[x]) + below[right] -
                 @as(i32, above[left]) - 2 * @as(i32, above[x]) - above[right]);
-            strength[y * width + x] += scale * @sqrt(across * across + down * down);
+            const index = y * width + x;
+            field.strength[index] += scale * @sqrt(across * across + down * down);
+            field.across_across[index] += (scale * across) * (scale * across);
+            field.across_down[index] += (scale * across) * (scale * down);
+            field.down_down[index] += (scale * down) * (scale * down);
         }
     }
 }
@@ -575,6 +659,397 @@ fn repeatMorphology(
 }
 
 // endregion: outline search
+
+// region: line search
+
+// The outline search needs a closed outline around the book and a free desk
+// around that outline. It fails on a desk with a texture, such as the grain of
+// wood (the texture is walls), when a thing touches the book (the thing and the
+// part of the desk that the two enclose stay with the book), and when one part
+// of the page outline is weak (the flood enters the page there).
+//
+// The line search looks for the four straight edges of a page. It takes the
+// straight lines of the frame (`lines.zig`), and then the four lines that make a
+// quad with a page inside: each side of the quad has steps along most of its
+// length, and most of the inside is bright. A gap in one side or a thing at one
+// corner does not break it.
+//
+// The result is the page with the largest product of its area and the support of
+// its four sides. The area alone is not enough: a quad with the edge of the desk
+// as one side is larger than the page, but two of its sides then go on past the
+// corners of the page, where they have no steps.
+//
+// Z. Zhang and L.-W. He, "Whiteboard scanning and image enhancement", Digital
+// Signal Processing 17(2), 2007, find a whiteboard in this way: a Hough transform
+// with the direction of the gradient, then two lines that go one way and two
+// lines across them, and a check that each side of the quad has edges. The
+// methods of the SmartDoc competition do the same for a document: J.-C. Burie et
+// al., "ICDAR2015 Competition on Smartphone Document Capture and OCR
+// (SmartDoc)", ICDAR 2015. `prototypes/detect/line_quads.py` has the experiment
+// behind this code.
+//
+// The sizes below are in pixels of the step field.
+
+/// The number of lines that can be a side of a page.
+const line_count = 24;
+const max_line_pairs = line_count * (line_count - 1) / 2;
+/// A step of this strength is a part of a line, in codes for one pixel. The grain
+/// of a desk is weaker, and the edge of a sheet of paper is stronger.
+const line_step = 6.0;
+/// The two opposite sides of a page differ by at most this many degrees: the
+/// camera does not look straight down at the page.
+const max_opposite_degrees = 30;
+/// Two sides that meet at a corner differ by at least this many degrees.
+const min_corner_degrees = 60;
+/// A side of a page, and a line, is at least this part of the short side of the frame.
+const min_side_fraction = 0.15;
+/// The edge of a sheet of paper has steps along all its length. A line on a page,
+/// such as the edge of a block of text or of a picture, or a line that is hidden
+/// in part, has not. So `min_strong_sides` of the four sides of a page have steps
+/// along `strong_side_support` of their length at least, and the last side along
+/// `min_side_support`: a finger or a shadow can hide a part of one side. On the
+/// benchmark video (a booklet on a dark desk, with a hand on it), this rule
+/// removes each quad that is not a sheet.
+const min_strong_sides = 3;
+const strong_side_support = 0.9;
+const min_side_support = 0.7;
+/// A side with steps along this part of its length has full support in the score
+/// of a page: the corners of a book are round, and the two ends of a side have
+/// no steps.
+const full_side_support = 0.9;
+/// This part of the inside of a page is bright.
+const min_bright_part = 0.8;
+/// The search is for a sheet of paper on a bright surface. A block of text or a
+/// picture on a page is a quad with lines too, and it is bright inside. But it has
+/// its own paper on the two sides of each of its lines, and a sheet has another
+/// surface around it: a desk, or a floor. The colour shows the difference. The
+/// mean chroma of the bright pixels outside a side of a sheet differs from the
+/// mean chroma inside by `min_surface_chroma` codes at least (U and V together),
+/// at `surface_distance` pixels from the side. The brightness does not show it:
+/// in a frame that is not sharp, a block of text is grey paper.
+///
+/// A sheet has another surface at `min_other_sides` of its four sides at least,
+/// and its own paper at `max_same_sides` at most: the other page of an open book.
+/// A side with a dark surface outside is neither: a dark thing lies there, or the
+/// desk is dark, and then the bright region finds the sheet.
+const surface_distance = 5.0;
+const min_surface_chroma = 3.0;
+const min_bright_outside = 0.5;
+const min_other_sides = 2;
+const max_same_sides = 1;
+/// The two ends of a side are not a part of that measure: this part of the
+/// length at each end.
+const surface_end_fraction = 0.1;
+/// The smallest page, as a part of the frame area. A smaller quad is more often
+/// a block of text or a picture than a page.
+const min_line_page_fraction = 0.08;
+/// The second page of an open book has an area within this factor of the first
+/// page, and the two pages have this part of the fold between them in common.
+const max_page_area_ratio = 1.7;
+const min_shared_fold = 0.7;
+/// The normal of the fold of an open book is within this many degrees of the
+/// direction from the left to the right: the fold goes from the top to the bottom.
+const max_fold_degrees = 45;
+
+/// A quad of four lines that is a page.
+const PageQuad = struct {
+    /// The corners go around the quad. The side `k` goes from the corner `k` to
+    /// the next corner, and it lies on the line `sides[k]`.
+    corners: [4]Point,
+    sides: [4]u8,
+    area: f32,
+    /// The area times the support of the four sides.
+    score: f32,
+};
+
+/// The paper of a frame: the mask of the bright pixels, and the two chroma planes
+/// of the frame. The three planes have one size, but for one pixel at the right
+/// and the lower border.
+const PaperMask = struct {
+    bright: Plane,
+    u: PlaneView,
+    v: PlaneView,
+};
+
+/// What lies outside one side of a quad.
+const Surface = enum {
+    /// Not bright: a dark desk, or a dark thing.
+    dark,
+    /// Bright, with the colour of the inside of the quad.
+    same,
+    /// Bright, with another colour.
+    other,
+};
+
+const LineSearch = struct {
+    found: lines.Lines,
+    paper: PaperMask,
+    /// The pixels of the paper planes for one pixel of the field, in each direction.
+    factor: u32,
+    width: f32,
+    height: f32,
+
+    /// The quad with two lines that go about one way (`first`) and two lines that
+    /// go about across them (`second`), when it is a page with a score above
+    /// `min_score`.
+    fn page(self: LineSearch, first: [2]u8, second: [2]u8, min_score: f32) ?PageQuad {
+        const items = self.found.items;
+        for (first) |a| {
+            for (second) |b| {
+                if (lines.angleBetween(items[a].degrees, items[b].degrees) < min_corner_degrees) return null;
+            }
+        }
+        // Around the quad: each corner is where two sides meet.
+        const meeting = [4][2]u8{ .{ first[0], second[0] }, .{ second[0], first[1] }, .{ first[1], second[1] }, .{ second[1], first[0] } };
+        const sides = [4]u8{ second[0], first[1], second[1], first[0] };
+        var corners: [4]Point = undefined;
+        for (meeting, &corners) |pair, *corner| {
+            corner.* = items[pair[0]].asGeometry().intersect(items[pair[1]].asGeometry()) orelse return null;
+            // The whole page is inside the frame.
+            if (corner.x < 0 or corner.y < 0 or corner.x > self.width - 1 or corner.y > self.height - 1) return null;
+        }
+        const quad = Quad.fromCorners(corners);
+        if (!quad.isConvex()) return null;
+        const area = quad.area();
+        if (area < min_line_page_fraction * self.width * self.height) return null;
+
+        const min_side = min_side_fraction * @min(self.width, self.height);
+        var strong_sides: u32 = 0;
+        var score = area;
+        for (sides, 0..) |line, k| {
+            const from = corners[k];
+            const to = corners[(k + 1) % corners.len];
+            if (from.distance(to) < min_side) return null;
+            const support = self.found.support(line, from, to);
+            if (support < min_side_support) return null;
+            strong_sides += @intFromBool(support >= strong_side_support);
+            score *= @min(1, support / full_side_support);
+        }
+        if (strong_sides < min_strong_sides) return null;
+        if (!(score > min_score)) return null;
+        if (self.brightPart(corners) < min_bright_part) return null;
+        var other_sides: u32 = 0;
+        var same_sides: u32 = 0;
+        const middle = quad.center();
+        for (corners, 0..) |from, k| {
+            switch (self.surfaceOutside(from, corners[(k + 1) % corners.len], middle)) {
+                .other => other_sides += 1,
+                .same => same_sides += 1,
+                .dark => {},
+            }
+        }
+        if (other_sides < min_other_sides or same_sides > max_same_sides) return null;
+        return .{ .corners = corners, .sides = sides, .area = area, .score = score };
+    }
+
+    /// The surface outside the side from `from` to `to` of a quad with the middle
+    /// `middle`.
+    fn surfaceOutside(self: LineSearch, from: Point, to: Point, middle: Point) Surface {
+        const side = Line.through(from, to);
+        // The normal of the side that points away from the middle of the quad.
+        const outward = if (side.signedDistance(middle) > 0) side.normal().scale(-1) else side.normal();
+        const shift = outward.scale(surface_distance);
+        const length = from.distance(to);
+        var outside: ChromaSum = .{};
+        var inside: ChromaSum = .{};
+        var places: u32 = 0;
+        var place = surface_end_fraction * length;
+        while (place <= (1 - surface_end_fraction) * length) : (place += 1) {
+            const on_side = from.lerp(to, place / length);
+            places += 1;
+            self.addChroma(&outside, on_side.add(shift));
+            self.addChroma(&inside, on_side.sub(shift));
+        }
+        if (@as(f32, @floatFromInt(outside.count)) < min_bright_outside * @as(f32, @floatFromInt(places))) return .dark;
+        if (inside.count == 0) return .other;
+        const difference = @abs(outside.meanU() - inside.meanU()) + @abs(outside.meanV() - inside.meanV());
+        return if (difference >= min_surface_chroma) .other else .same;
+    }
+
+    const ChromaSum = struct {
+        u: u32 = 0,
+        v: u32 = 0,
+        count: u32 = 0,
+
+        fn meanU(self: ChromaSum) f32 {
+            return @as(f32, @floatFromInt(self.u)) / @as(f32, @floatFromInt(self.count));
+        }
+
+        fn meanV(self: ChromaSum) f32 {
+            return @as(f32, @floatFromInt(self.v)) / @as(f32, @floatFromInt(self.count));
+        }
+    };
+
+    /// Add the chroma at a point of the field to a sum, when the point is inside
+    /// the frame and bright.
+    fn addChroma(self: LineSearch, sum: *ChromaSum, point: Point) void {
+        if (point.x < 0 or point.y < 0 or point.x > self.width - 1 or point.y > self.height - 1) return;
+        const x: usize = @intFromFloat(@round(point.x));
+        const y: usize = @intFromFloat(@round(point.y));
+        if (!self.brightAt(x, y)) return;
+        const mask_x = @min(x * self.factor + self.factor / 2, @min(self.paper.u.width, self.paper.v.width) - 1);
+        const mask_y = @min(y * self.factor + self.factor / 2, @min(self.paper.u.height, self.paper.v.height) - 1);
+        sum.u += self.paper.u.at(mask_x, mask_y);
+        sum.v += self.paper.v.at(mask_x, mask_y);
+        sum.count += 1;
+    }
+
+    /// True when the paper mask has the pixel in the middle of a pixel of the field.
+    fn brightAt(self: LineSearch, x: usize, y: usize) bool {
+        const mask_x = @min(x * self.factor + self.factor / 2, self.paper.bright.width - 1);
+        const mask_y = @min(y * self.factor + self.factor / 2, self.paper.bright.height - 1);
+        return self.paper.bright.at(mask_x, mask_y) != 0;
+    }
+
+    /// The part of the pixels inside a quad that the paper mask has.
+    fn brightPart(self: LineSearch, corners: [4]Point) f32 {
+        var inside: u32 = 0;
+        var bright_count: u32 = 0;
+        const rows: u32 = @intFromFloat(self.height);
+        const columns: u32 = @intFromFloat(self.width);
+        for (0..rows) |y| {
+            const span = quadRow(corners, @floatFromInt(y), columns) orelse continue;
+            for (span[0]..span[1] + 1) |x| {
+                inside += 1;
+                bright_count += @intFromBool(self.brightAt(x, y));
+            }
+        }
+        if (inside == 0) return 0;
+        return @as(f32, @floatFromInt(bright_count)) / @as(f32, @floatFromInt(inside));
+    }
+
+    /// The page on the other side of the fold of an open book, or null. The two
+    /// pages of an open book do not lie in one plane, so their upper edges are
+    /// two lines. The quad around the two pages has little support at its upper
+    /// side then, and one page alone is the best quad.
+    fn secondPage(self: LineSearch, first_page: PageQuad, pairs: []const [2]u8) ?PageQuad {
+        const items = self.found.items;
+        const middle = Quad.fromCorners(first_page.corners).center();
+        var best: ?PageQuad = null;
+        for (first_page.sides, 0..) |fold, k| {
+            if (lines.angleBetween(items[fold].degrees, 0) > max_fold_degrees) continue;
+            const fold_line = items[fold].asGeometry();
+            const page_side = fold_line.signedDistance(middle);
+            const along = items[fold].along();
+            const page_from = first_page.corners[k].dot(along);
+            const page_to = first_page.corners[(k + 1) % first_page.corners.len].dot(along);
+            for (0..items.len) |outer_index| {
+                const outer: u8 = @intCast(outer_index);
+                if (outer == fold) continue;
+                if (lines.angleBetween(items[outer].degrees, items[fold].degrees) > max_opposite_degrees) continue;
+                for (pairs) |across| {
+                    if (across[0] == fold or across[1] == fold or across[0] == outer or across[1] == outer) continue;
+                    const candidate = self.page(.{ fold, outer }, across, if (best) |page_quad| page_quad.score else 0) orelse continue;
+                    // On the other side of the fold, with about the size of the first page.
+                    if (fold_line.signedDistance(Quad.fromCorners(candidate.corners).center()) * page_side >= 0) continue;
+                    const ratio = candidate.area / first_page.area;
+                    if (ratio > max_page_area_ratio or ratio < 1.0 / max_page_area_ratio) continue;
+                    // The side of the candidate on the fold is its last side.
+                    const from = candidate.corners[3].dot(along);
+                    const to = candidate.corners[0].dot(along);
+                    const common = @min(@max(page_from, page_to), @max(from, to)) - @max(@min(page_from, page_to), @min(from, to));
+                    const longest = @max(@abs(page_to - page_from), @abs(to - from));
+                    if (common < min_shared_fold * longest) continue;
+                    best = candidate;
+                }
+            }
+        }
+        return best;
+    }
+
+    /// The corners of a quad of the field in pixels of the paper mask.
+    fn inMask(self: LineSearch, corners: [4]Point) [4]Point {
+        const factor: f32 = @floatFromInt(self.factor);
+        var scaled: [4]Point = undefined;
+        // The middle of a pixel of the field is the middle of its pixels of the mask.
+        for (corners, &scaled) |corner, *out| out.* = .{ .x = (corner.x + 0.5) * factor - 0.5, .y = (corner.y + 0.5) * factor - 0.5 };
+        return scaled;
+    }
+};
+
+/// The pixels of the row `y` that lie inside a convex quad: the first and the
+/// last column. Null when the row does not cross the quad inside the plane.
+fn quadRow(corners: [4]Point, y: f32, columns: u32) ?[2]usize {
+    var low = std.math.inf(f32);
+    var high = -std.math.inf(f32);
+    for (corners, 0..) |a, k| {
+        const b = corners[(k + 1) % corners.len];
+        // A side crosses the row when its two ends lie on the two sides of the row.
+        if ((a.y <= y) == (b.y <= y)) continue;
+        const x = a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y);
+        low = @min(low, x);
+        high = @max(high, x);
+    }
+    if (!(low <= high)) return null;
+    const first = @ceil(@max(low, 0));
+    const last = @floor(@min(high, @as(f32, @floatFromInt(columns)) - 1));
+    if (!(first <= last)) return null;
+    return .{ @intFromFloat(first), @intFromFloat(last) };
+}
+
+/// Set the pixels of a mask that lie inside a convex quad.
+fn fillQuad(mask: Plane, corners: [4]Point) void {
+    for (0..mask.height) |y| {
+        const span = quadRow(corners, @floatFromInt(y), mask.width) orelse continue;
+        @memset(mask.row(y)[span[0] .. span[1] + 1], raster.mask_set);
+    }
+}
+
+/// Find a page by its four straight edges, and the second page of an open book
+/// next to it. `field` has the steps of the frame, and `paper` its paper mask.
+/// The region is the inside of the page: a hand on the page does not change it.
+/// Returns null when no four lines make a page.
+fn lineRegion(allocator: Allocator, field: StepField, paper: PaperMask) Allocator.Error!?OutlineRegion {
+    const line_options: lines.Options = .{
+        .max_lines = line_count,
+        .support_strength = line_step,
+        // A line has steps along a part of the short side of the frame at least.
+        .min_votes = min_side_fraction * @as(f32, @floatFromInt(@min(field.width, field.height))) * line_step,
+    };
+    const angles = try allocator.alloc(u8, field.strength.len);
+    defer allocator.free(angles);
+    for (angles, field.strength, 0..) |*angle, strength, index| {
+        // The line search does not read the direction of a step with no vote.
+        angle.* = if (strength > line_options.min_vote_strength) field.angle(index) else 0;
+    }
+    const found = try lines.find(allocator, .{ .width = field.width, .height = field.height, .strength = field.strength, .angle = angles }, line_options);
+    defer found.deinit(allocator);
+
+    const search: LineSearch = .{
+        .found = found,
+        .paper = paper,
+        .factor = field.factor,
+        .width = @floatFromInt(field.width),
+        .height = @floatFromInt(field.height),
+    };
+    // The pairs of lines that go about one way: the two opposite sides of a page.
+    var pairs: [max_line_pairs][2]u8 = undefined;
+    var pair_count: usize = 0;
+    for (found.items, 0..) |a, first| {
+        for (found.items[first + 1 ..], first + 1..) |b, second| {
+            if (lines.angleBetween(a.degrees, b.degrees) > max_opposite_degrees) continue;
+            pairs[pair_count] = .{ @intCast(first), @intCast(second) };
+            pair_count += 1;
+        }
+    }
+    var best: ?PageQuad = null;
+    for (pairs[0..pair_count], 0..) |first, index| {
+        for (pairs[index + 1 .. pair_count]) |second| {
+            if (first[0] == second[0] or first[0] == second[1] or first[1] == second[0] or first[1] == second[1]) continue;
+            best = search.page(first, second, if (best) |page_quad| page_quad.score else 0) orelse continue;
+        }
+    }
+    const first_page = best orelse return null;
+
+    const mask = try Plane.initFilled(allocator, paper.bright.width, paper.bright.height, 0);
+    defer mask.deinit(allocator);
+    fillQuad(mask, search.inMask(first_page.corners));
+    if (search.secondPage(first_page, pairs[0..pair_count])) |second_page| fillQuad(mask, search.inMask(second_page.corners));
+    const region = (try raster.largestRegion(allocator, mask)) orelse return null;
+    return .{ .region = region, .step = @floatFromInt(field.factor) };
+}
+
+// endregion: line search
 
 // region: paper frame
 
@@ -1847,6 +2322,245 @@ test "the outline search frees its memory when an allocation fails" {
         }
     };
     try alloc_check.eachFailure(testing.allocator, Run.run, .{room.view});
+}
+
+/// A frame of a white desk with one page or with the two pages of an open book.
+/// The paper is a little brighter than the desk and has the colour of cream, and
+/// a thin dark line goes around each page: the shadow of the sheet. Each outline
+/// has a gap: a soft shadow lies there, in which the paper and the desk have one
+/// brightness and one colour. A flood from the frame border gets into each page
+/// through its gap, so the outline search finds no paper.
+const WhiteDesk = struct {
+    buffer: []u8,
+    view: image.FrameView,
+
+    const width = 640;
+    const height = 480;
+    const desk_luma = 185;
+    const page_luma = 205;
+    const outline_luma = 110;
+    const thing_luma = 50;
+    const text_luma = 90;
+    const neutral = 128;
+    /// The paper has the colour of cream.
+    const paper_u = 121;
+    const paper_v = 133;
+    /// Half the width of the line around a page, in luma pixels of the frame, and
+    /// half the width of the soft edge of that line.
+    const outline_half_width = 2.5;
+    const outline_soft_edge = 1.5;
+    /// The soft shadow at a gap: the paper has the brightness of the desk within
+    /// the first distance from the middle of the gap, and its own brightness from
+    /// the second distance on, in luma pixels of the frame. The change between
+    /// the two is too slow for a step.
+    const shadow_core = 40.0;
+    const shadow_end = 110.0;
+
+    /// A side of a page with a gap: the part of the side from `gap_from` to
+    /// `gap_to`, as fractions of its length, has no line.
+    const Side = struct {
+        from: Point,
+        to: Point,
+        gap_from: f32 = 0,
+        gap_to: f32 = 0,
+
+        fn hasGap(self: Side) bool {
+            return self.gap_to > self.gap_from;
+        }
+
+        fn gapMiddle(self: Side) Point {
+            return self.from.lerp(self.to, 0.5 * (self.gap_from + self.gap_to));
+        }
+    };
+
+    /// One page with a tilt. The right side has a gap, a dark thing lies on a part
+    /// of that side and goes out of the frame, and the page has a small block of
+    /// text.
+    const single_page: Quad = .{
+        .tl = Point.init(300, 100),
+        .tr = Point.init(480, 110),
+        .br = Point.init(470, 380),
+        .bl = Point.init(290, 370),
+    };
+    const single_sides = [_]Side{
+        .{ .from = single_page.tl, .to = single_page.tr },
+        .{ .from = single_page.tr, .to = single_page.br, .gap_from = 0.62, .gap_to = 0.75 },
+        .{ .from = single_page.br, .to = single_page.bl },
+        .{ .from = single_page.bl, .to = single_page.tl },
+    };
+
+    /// An open book. The two pages do not lie in one plane: their upper edges
+    /// and their lower edges are two lines each, which meet at the fold. The
+    /// outer side of each page has a gap.
+    const fold_top = Point.init(310, 125);
+    const fold_bottom = Point.init(310, 375);
+    const left_page: Quad = .{ .tl = Point.init(150, 110), .tr = fold_top, .br = fold_bottom, .bl = Point.init(150, 390) };
+    const right_page: Quad = .{ .tl = fold_top, .tr = Point.init(470, 110), .br = Point.init(470, 390), .bl = fold_bottom };
+    const book_sides = [_]Side{
+        .{ .from = left_page.tl, .to = left_page.tr },
+        .{ .from = left_page.br, .to = left_page.bl },
+        .{ .from = left_page.bl, .to = left_page.tl, .gap_from = 0.4, .gap_to = 0.65 },
+        .{ .from = fold_top, .to = fold_bottom },
+        .{ .from = right_page.tl, .to = right_page.tr },
+        .{ .from = right_page.tr, .to = right_page.br, .gap_from = 0.4, .gap_to = 0.65 },
+        .{ .from = right_page.br, .to = right_page.bl },
+    };
+
+    const Kind = enum { single, book };
+
+    /// How much of the look of the paper is left at a point, from 0 in the middle
+    /// of a soft shadow to 1 outside the shadows.
+    fn paperPart(kind: Kind, point: Point) f32 {
+        const sides: []const Side = if (kind == .single) &single_sides else &book_sides;
+        var part: f32 = 1;
+        for (sides) |side| {
+            if (!side.hasGap()) continue;
+            const distance = point.distance(side.gapMiddle());
+            part = @min(part, std.math.clamp((distance - shadow_core) / (shadow_end - shadow_core), 0, 1));
+        }
+        return part;
+    }
+
+    fn luma(kind: Kind, x: f32, y: f32) u8 {
+        const point = Point.init(x, y);
+        const sides: []const Side = if (kind == .single) &single_sides else &book_sides;
+        const paper_part = paperPart(kind, point);
+        // How much of the pixel the line around a page covers: 0 to 1. The edge of
+        // the line is soft, as a camera makes it: the direction of a step is then
+        // the direction across the line, also for a line with a small slope.
+        var line_part: f32 = 0;
+        for (sides) |side| {
+            const along = side.to.sub(side.from);
+            const place = point.sub(side.from).dot(along) / along.dot(along);
+            if (place < 0 or place > 1) continue;
+            if (place > side.gap_from and place < side.gap_to) continue;
+            const distance = @abs(Line.through(side.from, side.to).signedDistance(point));
+            line_part = @max(line_part, std.math.clamp((outline_half_width + outline_soft_edge - distance) / (2 * outline_soft_edge), 0, 1));
+        }
+        var on_page = false;
+        switch (kind) {
+            .single => {
+                if (onThing(x, y)) return thing_luma;
+                if (x > 330 and x < 420 and y > 180 and y < 280 and @mod(y, 14) < 4) return text_luma;
+                on_page = single_page.contains(point);
+            },
+            .book => {
+                if (x > 560 and y > 420) return thing_luma;
+                on_page = left_page.contains(point) or right_page.contains(point);
+            },
+        }
+        const surface = if (on_page) desk_luma + paper_part * (page_luma - desk_luma) else desk_luma;
+        return @intFromFloat(@round(surface + line_part * (outline_luma - surface)));
+    }
+
+    /// The dark thing of the frame with one page: it lies on the right side of
+    /// the page, below the upper right corner, and goes out of the frame.
+    fn onThing(x: f32, y: f32) bool {
+        return x > 468 and y > 130 and y < 150;
+    }
+
+    fn onPaper(kind: Kind, x: f32, y: f32) bool {
+        const point = Point.init(x, y);
+        return switch (kind) {
+            .single => single_page.contains(point) and !onThing(x, y),
+            .book => left_page.contains(point) or right_page.contains(point),
+        };
+    }
+
+    fn init(kind: Kind) !WhiteDesk {
+        const buffer = try testing.allocator.alloc(u8, image.packedFrameSize(width, height));
+        for (0..height) |y| {
+            for (0..width) |x| buffer[y * width + x] = luma(kind, @floatFromInt(x), @floatFromInt(y));
+        }
+        const luma_size = width * height;
+        const chroma_width = width / 2;
+        const chroma_size = chroma_width * (height / 2);
+        for (0..height / 2) |y| {
+            for (0..chroma_width) |x| {
+                const fx: f32 = @floatFromInt(2 * x);
+                const fy: f32 = @floatFromInt(2 * y);
+                // In a soft shadow, the paper has the colour of the desk too.
+                const part = if (onPaper(kind, fx, fy)) paperPart(kind, Point.init(fx, fy)) else 0;
+                buffer[luma_size + y * chroma_width + x] = @intFromFloat(@round(neutral + part * (paper_u - neutral)));
+                buffer[luma_size + chroma_size + y * chroma_width + x] = @intFromFloat(@round(neutral + part * (paper_v - neutral)));
+            }
+        }
+        return .{ .buffer = buffer, .view = image.FrameView.fromPacked(buffer, width, height, .{}) };
+    }
+
+    fn deinit(self: WhiteDesk) void {
+        testing.allocator.free(self.buffer);
+    }
+};
+
+test "a page on a desk as bright as the page is found by its four edges" {
+    const desk = try WhiteDesk.init(.single);
+    defer desk.deinit();
+
+    // The outline search alone finds no paper: the flood gets into the page
+    // through the soft shadow.
+    const outline_only = (try analyzeScene(testing.allocator, desk.view, .{ .layout = .single, .line_search = false })).?;
+    defer outline_only.deinit(testing.allocator);
+    try testing.expect(outline_only.region.touches_border);
+
+    const scene = (try analyzeScene(testing.allocator, desk.view, .{ .layout = .single })).?;
+    defer scene.deinit(testing.allocator);
+    try testing.expect(!scene.region.touches_border);
+    const layout = (try detectLayout(testing.allocator, &scene, .{ .layout = .single })).?;
+    try testing.expectEqual(LayoutKind.single, layout.kind);
+    // The line around the page has a width of 5 pixels, and a line of the search
+    // has a direction in whole degrees.
+    const tolerance = 8.0;
+    try expectPointNear(WhiteDesk.single_page.tl, layout.pages[0].tl, tolerance);
+    try expectPointNear(WhiteDesk.single_page.tr, layout.pages[0].tr, tolerance);
+    try expectPointNear(WhiteDesk.single_page.br, layout.pages[0].br, tolerance);
+    try expectPointNear(WhiteDesk.single_page.bl, layout.pages[0].bl, tolerance);
+}
+
+test "the two pages of an open book are found when their upper edges are two lines" {
+    const desk = try WhiteDesk.init(.book);
+    defer desk.deinit();
+    const scene = (try analyzeScene(testing.allocator, desk.view, .{})).?;
+    defer scene.deinit(testing.allocator);
+    try testing.expect(!scene.region.touches_border);
+    // The region has the two pages, in pixels of the half-size image.
+    const tolerance = 4;
+    try testing.expect(scene.region.min_x <= 150 / 2 + tolerance);
+    try testing.expect(scene.region.max_x >= 470 / 2 - tolerance);
+    try testing.expect(scene.region.min_y <= 125 / 2 + tolerance);
+    try testing.expect(scene.region.max_y >= 375 / 2 - tolerance);
+    const layout = (try detectLayout(testing.allocator, &scene, .{})).?;
+    try testing.expectEqual(LayoutKind.spread, layout.kind);
+    try testing.expectApproxEqAbs(@as(f32, 310), layout.pages[0].tr.x, 8);
+    try testing.expectApproxEqAbs(@as(f32, 310), layout.pages[1].tl.x, 8);
+}
+
+test "a row of a quad has the pixels between its two sides" {
+    const quad = [4]Point{ Point.init(10, 5), Point.init(30, 5), Point.init(40, 25), Point.init(10, 25) };
+    try testing.expectEqual(@as(?[2]usize, null), quadRow(quad, 2, 64));
+    try testing.expectEqual(@as(?[2]usize, .{ 10, 35 }), quadRow(quad, 15, 64));
+    // The plane ends before the quad does.
+    try testing.expectEqual(@as(?[2]usize, .{ 10, 31 }), quadRow(quad, 15, 32));
+
+    const mask = try Plane.initFilled(testing.allocator, 64, 32, 0);
+    defer mask.deinit(testing.allocator);
+    fillQuad(mask, quad);
+    try testing.expectEqual(@as(u8, raster.mask_set), mask.at(20, 15));
+    try testing.expectEqual(@as(u8, 0), mask.at(38, 15));
+    try testing.expectEqual(@as(u8, 0), mask.at(20, 28));
+}
+
+test "the line search frees its memory when an allocation fails" {
+    const desk = try WhiteDesk.init(.single);
+    defer desk.deinit();
+    const Run = struct {
+        fn run(allocator: Allocator, frame: image.FrameView) !void {
+            const scene = (try analyzeScene(allocator, frame, .{ .layout = .single })) orelse return error.NoScene;
+            defer scene.deinit(allocator);
+            if (scene.region.touches_border) return error.LinesNotUsed;
+        }
+    };
+    try alloc_check.eachFailure(testing.allocator, Run.run, .{desk.view});
 }
 
 test "a frame without paper has no scene" {
