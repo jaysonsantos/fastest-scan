@@ -142,9 +142,9 @@ fn run(init: std.process.Init, config: *const args.Config, stdout: *Io.Writer) !
             document.memory.fresh_bytes / bytes_per_megabyte,
             document.memory.reused_blocks,
         });
-        std.debug.print("decode: the render pass needed {d} full-size frames; the decoders decoded {d} frames for them\n", .{
-            document.frames_taken,
-            document.frames_decoded,
+        std.debug.print("decode: the render pass needs {d} full-size frames; with no frame cache, the decoders decode {d} frames for them\n", .{
+            document.frames_needed,
+            document.frames_to_decode,
         });
     }
 

@@ -442,10 +442,10 @@ pub const RenderedDocument = struct {
     finger_pages: usize,
     /// The large blocks of working memory of all workers.
     memory: BlockCache.Stats,
-    /// The full-size frames that the decoders decoded, and the ones that a job
-    /// needed. The two are 0 when all frames came from the frame cache.
-    frames_decoded: usize,
-    frames_taken: usize,
+    /// The full-size frames that the jobs need, and the frames that the decoders
+    /// decode for them when no frame is in a cache.
+    frames_needed: usize,
+    frames_to_decode: usize,
 
     pub fn deinit(self: RenderedDocument, allocator: Allocator) void {
         for (self.pages) |page| page.deinit(allocator);
@@ -453,13 +453,14 @@ pub const RenderedDocument = struct {
     }
 };
 
-/// The work of the decoders for the full-size frames. The workers count together.
+/// The work of the decoders for the full-size frames, when no frame is in a cache.
+/// The workers count together.
 pub const DecodeCounts = struct {
-    /// The frames that the decoders had to decode: each frame from a keyframe to
-    /// the last frame that a job needed.
-    decoded: std.atomic.Value(usize) = .init(0),
-    /// The frames that came through a pipe: the frames that a job needed.
-    taken: std.atomic.Value(usize) = .init(0),
+    /// The frames that the jobs need.
+    needed: std.atomic.Value(usize) = .init(0),
+    /// The frames that the decoders must decode for them: each frame from a
+    /// keyframe to the last frame that a job needs.
+    to_decode: std.atomic.Value(usize) = .init(0),
 };
 
 /// One run of a decoder: it starts at a keyframe and gives frames up to the next
@@ -551,6 +552,15 @@ const FrameStore = struct {
         const loaded = try self.gpa.alloc(bool, indexes.len);
         defer self.gpa.free(loaded);
         @memset(loaded, false);
+        {
+            // The count is the same with a frame cache and without one.
+            const all = try planDecoderRuns(self.gpa, self.info, indexes, loaded);
+            defer all.deinit(self.gpa);
+            var frames: usize = 0;
+            for (all.runs) |run| frames += indexes[run.to - 1] - run.first + 1;
+            _ = self.counts.needed.fetchAdd(indexes.len, .monotonic);
+            _ = self.counts.to_decode.fetchAdd(frames, .monotonic);
+        }
         var name_buffer: [64]u8 = undefined;
         if (self.cache_dir) |dir| {
             for (indexes, buffers, loaded) |frame_index, buffer, *done| {
@@ -586,7 +596,6 @@ const FrameStore = struct {
                     .frame_count = frame_count,
                     .select = plan.offsets[next.offsets_from..next.offsets_to],
                 });
-                _ = self.counts.decoded.fetchAdd(frame_count, .monotonic);
             }
             const reader = readers[run_index].?;
             for (indexes[run.from..run.to], buffers[run.from..run.to], loaded[run.from..run.to]) |frame_index, buffer, *done| {
@@ -595,7 +604,6 @@ const FrameStore = struct {
                 _ = (try reader.next()) orelse break;
                 @memcpy(buffer, reader.frameBytes());
                 done.* = true;
-                _ = self.counts.taken.fetchAdd(1, .monotonic);
                 if (self.cache_dir) |dir| {
                     try dir.writeFile(self.io, .{ .sub_path = try self.cacheName(&name_buffer, frame_index), .data = buffer });
                 }
@@ -1085,8 +1093,8 @@ pub fn renderDocument(
         .finger_left = 0,
         .finger_pages = 0,
         .memory = .{},
-        .frames_decoded = decode_counts.decoded.load(.monotonic),
-        .frames_taken = decode_counts.taken.load(.monotonic),
+        .frames_needed = decode_counts.needed.load(.monotonic),
+        .frames_to_decode = decode_counts.to_decode.load(.monotonic),
     };
     for (caches) |*cache| document.memory.add(cache.stats);
     var pages: std.ArrayList(fastscan.render.EncodedPage) = .empty;
