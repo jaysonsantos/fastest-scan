@@ -63,6 +63,15 @@
             android:layout_height="0dp"
             android:layout_weight="1" />
 
+        <!-- For a test: the camera writes a video of the scan to a file too. -->
+        <CheckBox
+            android:id="@+id/video_check"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:enabled="false"
+            android:text="@string/check_video"
+            android:textColor="@android:color/white" />
+
         <LinearLayout
             android:id="@+id/buttons"
             android:layout_width="match_parent"

@@ -9,6 +9,7 @@
     <string name="button_video">Video</string>
     <string name="button_cancel">Cancel</string>
     <string name="button_save">Save PDF</string>
+    <string name="check_video">Keep a video of the scan</string>
 
     <string name="status_idle">Film the pages of a book, or open a video of them.</string>
     <string name="status_camera_error">The camera does not start: %1$s. You can open a video.</string>
@@ -19,6 +20,9 @@
     <string name="status_saved">The PDF is saved.</string>
     <string name="status_error">Error: %1$s</string>
     <string name="error_turned">The phone turned during the scan. Start the scan again.</string>
+    <string name="status_no_video_stream">This camera cannot make a video during a scan.</string>
+    <string name="status_video_saved">The video is %1$s.</string>
+    <string name="status_video_error">The video has an error: %1$s</string>
     <plurals name="status_done">
         <item quantity="one">The scan has %d page.</item>
         <item quantity="other">The scan has %d pages.</item>

@@ -8,14 +8,24 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.util.Size
+import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCase
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.video.FallbackStrategy
+import androidx.camera.video.FileOutputOptions
+import androidx.camera.video.Quality
+import androidx.camera.video.QualitySelector
+import androidx.camera.video.Recorder
+import androidx.camera.video.Recording
+import androidx.camera.video.VideoCapture
+import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
@@ -25,6 +35,7 @@ import br.com.jayson.fastestscan.core.ColorRange
 import br.com.jayson.fastestscan.core.FrameFormat
 import br.com.jayson.fastestscan.core.ScanSession
 import br.com.jayson.fastestscan.core.ScanStatus
+import java.io.File
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -36,6 +47,10 @@ import java.util.concurrent.Executors
  *
  * The two streams follow the rotation of the screen: the frames for the library
  * are upright when the picture on the screen is upright.
+ *
+ * The camera can give a third stream for a video file of a scan ([setVideoStream]).
+ * The video is for a test: the desktop program can do the same scan again from
+ * it. The library does not use it.
  *
  * When the library is slower than the camera, the camera drops frames: the library
  * measures the frame rate from the times of the frames that it gets.
@@ -61,6 +76,10 @@ class CameraSource(
     private var provider: ProcessCameraProvider? = null
     private var preview: Preview? = null
     private var analysis: ImageAnalysis? = null
+
+    /** The stream for a video file, or null when it is off. Only the main thread uses it and [recording]. */
+    private var video: VideoCapture<Recorder>? = null
+    private var recording: Recording? = null
 
     /** A turn of the screen by a half turn changes no configuration: only this listener sees it. */
     private val displayListener = object : DisplayManager.DisplayListener {
@@ -115,11 +134,9 @@ class CameraSource(
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
                 newAnalysis.setAnalyzer(frameThread, ::analyze)
-                cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, newPreview, newAnalysis)
                 preview = newPreview
                 analysis = newAnalysis
-                followDisplay()
+                bind(cameraProvider)
                 displays.registerDisplayListener(displayListener, Handler(Looper.getMainLooper()))
                 onReady()
             } catch (error: Throwable) {
@@ -128,11 +145,54 @@ class CameraSource(
         }, ContextCompat.getMainExecutor(context))
     }
 
-    /** Give the rotation of the screen to the two streams. Runs on the main thread. */
+    /** Start the camera with its streams: the preview, the frames, and the video when it is on. */
+    private fun bind(cameraProvider: ProcessCameraProvider) {
+        val streams = listOfNotNull<UseCase>(preview, analysis, video)
+        cameraProvider.unbindAll()
+        cameraProvider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, *streams.toTypedArray())
+        followDisplay()
+    }
+
+    /**
+     * Turn the stream for a video file on or off. The camera starts again, so the
+     * preview stops for a moment. Returns false when the camera cannot give the
+     * third stream: it then runs with no video stream. Runs on the main thread,
+     * not during a scan.
+     */
+    fun setVideoStream(enabled: Boolean): Boolean {
+        val cameraProvider = provider ?: return false
+        if (enabled == (video != null)) return true
+        video = if (enabled) {
+            // The video has the shape of the frames for the library, and their size
+            // when the camera gives a third stream of that size. On the phone of
+            // the tests it does not: the video then has the size of the preview.
+            val recorder = Recorder.Builder()
+                .setAspectRatio(AspectRatio.RATIO_4_3)
+                .setQualitySelector(QualitySelector.from(Quality.UHD, FallbackStrategy.lowerQualityOrHigherThan(Quality.UHD)))
+                .setTargetVideoEncodingBitRate(VIDEO_BITS_PER_SECOND)
+                .build()
+            VideoCapture.withOutput(recorder)
+        } else {
+            null
+        }
+        return try {
+            bind(cameraProvider)
+            true
+        } catch (error: IllegalArgumentException) {
+            // The camera has no such set of streams.
+            Log.w(TAG, "the camera gives no video stream next to the two other streams", error)
+            video = null
+            bind(cameraProvider)
+            false
+        }
+    }
+
+    /** Give the rotation of the screen to the streams. Runs on the main thread. */
     private fun followDisplay() {
         val rotation = previewView.display?.rotation ?: return
         preview?.targetRotation = rotation
         analysis?.targetRotation = rotation
+        video?.targetRotation = rotation
     }
 
     private var createSession: ((FrameFormat) -> ScanSession)? = null
@@ -143,8 +203,29 @@ class CameraSource(
      * Start to give the frames to a session. [createSession] makes the session with
      * the first frame, when the size and the rotation of the frames are known. The
      * screen must keep its rotation until [stopScan]: a session has one rotation.
+     *
+     * With [videoFile] and the video stream on, the camera writes a video of the
+     * scan to that file. [onVideoEnd] gets the file when it is complete, or the
+     * error, on the main thread. Runs on the main thread.
      */
-    fun startScan(createSession: (FrameFormat) -> ScanSession, listener: Listener, onError: (Throwable) -> Unit) {
+    fun startScan(
+        createSession: (FrameFormat) -> ScanSession,
+        listener: Listener,
+        onError: (Throwable) -> Unit,
+        videoFile: File? = null,
+        onVideoEnd: (File, Throwable?) -> Unit = { _, _ -> },
+    ) {
+        val stream = video
+        if (videoFile != null && stream != null) {
+            recording = stream.output
+                .prepareRecording(context, FileOutputOptions.Builder(videoFile).build())
+                .start(ContextCompat.getMainExecutor(context)) { event ->
+                    if (event is VideoRecordEvent.Finalize) {
+                        val error = if (event.hasError()) event.cause ?: IllegalStateException("video error ${event.error}") else null
+                        onVideoEnd(videoFile, error)
+                    }
+                }
+        }
         frameThread.execute {
             this.createSession = createSession
             this.listener = listener
@@ -159,8 +240,10 @@ class CameraSource(
     /**
      * Stop to give frames. [onStopped] gets the session, or null when no frame
      * came, on the camera thread. The caller calls `finish` and `close` on it.
+     * Runs on the main thread.
      */
     fun stopScan(onStopped: (ScanSession?) -> Unit) {
+        stopVideo()
         frameThread.execute {
             scanning = false
             val stopped = session
@@ -169,7 +252,14 @@ class CameraSource(
         }
     }
 
+    /** End the video file of a scan. Runs on the main thread. */
+    fun stopVideo() {
+        recording?.stop()
+        recording = null
+    }
+
     fun close() {
+        stopVideo()
         displays.unregisterDisplayListener(displayListener)
         provider?.unbindAll()
         frameThread.shutdown()
@@ -232,6 +322,13 @@ class CameraSource(
 
     private companion object {
         const val TAG = "fastscan"
+
+        /**
+         * The bit rate of the video of a scan. The encoder of a phone takes much
+         * less for a small video by default, and the text of a page is then not
+         * sharp enough to do the scan again from the video.
+         */
+        const val VIDEO_BITS_PER_SECOND = 16_000_000
 
         /** The log gets one line about the speed for this many frames. */
         const val LOG_FRAMES = 60

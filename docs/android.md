@@ -134,6 +134,36 @@ adb shell am start -a android.intent.action.VIEW -t video/mp4 \
   -n br.com.jayson.fastestscan/.ui.MainActivity
 ```
 
+## Keep a video of a camera scan
+
+A scan with the camera writes no video file: the library keeps only the frames
+that it needs. So a scan that goes wrong cannot be done again. For a test, turn
+on "Keep a video of the scan" before the scan. The camera then gives a third
+stream, and the app writes it to a file while the scan runs. After the scan,
+the screen and the log show the name of the file.
+
+Copy the file to the computer and do the scan again with the desktop program,
+in the flow of the app:
+
+```sh
+adb pull /sdcard/Android/data/br.com.jayson.fastestscan/files/Movies/scan-20261012-165209.mp4 out/
+zig-out/bin/fastest-scan out/scan-20261012-165209.mp4 -o out/replay.pdf --stream -v --debug-dir out/replay
+```
+
+The video is not the same as the frames that the library got:
+
+- On the phone of the tests the video has 1600 x 1200 pixels, the size of the
+  preview. The frames for the library have 2880 x 2160 pixels. The camera of
+  that phone gives no third stream of the large size next to the two other
+  streams.
+- The video has all frames of the camera. The library gets fewer frames: the
+  camera drops the frames that come while the library works.
+- The video has the compression of the encoder of the phone.
+
+In a test on the phone, the scan with the camera and the scan of its video on
+the desktop gave the same page: one page of a book on a white desk. With the
+video stream on, the speed of the scan was the same as with it off.
+
 ## How the app uses the library
 
 - A source gives each frame to `ScanSession.push` on its own thread: the camera

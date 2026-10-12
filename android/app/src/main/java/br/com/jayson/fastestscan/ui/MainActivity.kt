@@ -10,11 +10,14 @@ import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.net.Uri
 import android.os.Bundle
+import android.os.Environment
+import android.util.Log
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.view.WindowManager
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -29,6 +32,9 @@ import br.com.jayson.fastestscan.core.ScanSession
 import br.com.jayson.fastestscan.core.ScanStatus
 import br.com.jayson.fastestscan.source.CameraSource
 import br.com.jayson.fastestscan.source.VideoFileSource
+import java.io.File
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -58,8 +64,12 @@ class MainActivity : ComponentActivity() {
     private lateinit var cameraButton: Button
     private lateinit var videoButton: Button
     private lateinit var saveButton: Button
+    private lateinit var videoCheck: CheckBox
 
     private var camera: CameraSource? = null
+
+    /** The text about the video file of the last scan with the camera, or null. */
+    private var videoNote: String? = null
 
     /** True when the camera gives its preview: a scan with the camera can start. */
     private var cameraReady = false
@@ -108,6 +118,7 @@ class MainActivity : ComponentActivity() {
         cameraButton = findViewById(R.id.camera_button)
         videoButton = findViewById(R.id.video_button)
         saveButton = findViewById(R.id.save_button)
+        videoCheck = findViewById(R.id.video_check)
         // The whole frame is in view, at the start of its part of the screen: the
         // free end of that part is next to the panel.
         previewView.scaleType = PreviewView.ScaleType.FIT_START
@@ -116,6 +127,7 @@ class MainActivity : ComponentActivity() {
         cameraButton.setOnClickListener { if (state == State.CAMERA_SCAN) stopCameraScan() else startCameraScan() }
         videoButton.setOnClickListener { if (state == State.VIDEO_SCAN) cancelled.set(true) else pickVideo.launch(VIDEO_MIME_TYPE) }
         saveButton.setOnClickListener { createPdf.launch(getString(R.string.default_file_name)) }
+        videoCheck.setOnClickListener { setVideoStream(videoCheck.isChecked) }
         showState(State.IDLE)
 
         // Another app opened a video with this app: scan it. The camera stays off.
@@ -170,8 +182,44 @@ class MainActivity : ComponentActivity() {
     private fun startCameraScan() {
         val source = camera ?: return
         dropOldSession()
+        videoNote = null
         showState(State.CAMERA_SCAN)
-        source.startScan(::createSession, { uprightToSensor, status -> postStatus(uprightToSensor, status) }, ::scanFailed)
+        source.startScan(
+            createSession = ::createSession,
+            listener = { uprightToSensor, status -> postStatus(uprightToSensor, status) },
+            onError = ::scanFailed,
+            videoFile = if (videoCheck.isChecked) newVideoFile() else null,
+            onVideoEnd = ::videoEnded,
+        )
+    }
+
+    /** The user turned the video of a scan on or off. */
+    private fun setVideoStream(enabled: Boolean) {
+        val source = camera ?: return
+        if (!source.setVideoStream(enabled) && enabled) {
+            videoCheck.isChecked = false
+            statusText.setText(R.string.status_no_video_stream)
+        }
+    }
+
+    /** A new file for the video of a scan, in the directory of the app for movies. */
+    private fun newVideoFile(): File {
+        val directory = getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: filesDir
+        return File(directory, String.format(Locale.ROOT, VIDEO_FILE_NAME, Date()))
+    }
+
+    /** The video file of a scan is complete, or it has an error. Runs on the main thread. */
+    private fun videoEnded(file: File, error: Throwable?) {
+        val note = if (error == null) {
+            Log.i(LOG_TAG, "video of the scan: ${file.absolutePath}")
+            getString(R.string.status_video_saved, file.name)
+        } else {
+            Log.w(LOG_TAG, "the video of the scan has an error", error)
+            getString(R.string.status_video_error, error.message ?: error.javaClass.simpleName)
+        }
+        videoNote = note
+        // The scan can end before the file or after it.
+        if (state == State.IDLE) statusText.append(" $note")
     }
 
     private fun stopCameraScan() {
@@ -226,6 +274,7 @@ class MainActivity : ComponentActivity() {
                 showState(State.IDLE)
                 val pages = finished?.pageCount ?: 0
                 statusText.text = resources.getQuantityString(R.plurals.status_done, pages, pages)
+                videoNote?.let { statusText.append(" $it") }
                 saveButton.isEnabled = pages > 0
             }
         } catch (error: Throwable) {
@@ -243,6 +292,7 @@ class MainActivity : ComponentActivity() {
 
     private fun scanFailed(error: Throwable) {
         runOnUiThread {
+            camera?.stopVideo()
             showState(State.IDLE)
             statusText.text = getString(R.string.status_error, error.message ?: error.javaClass.simpleName)
         }
@@ -328,6 +378,8 @@ class MainActivity : ComponentActivity() {
 
     private fun updateButtons() {
         cameraButton.isEnabled = (state == State.IDLE || state == State.CAMERA_SCAN) && cameraReady
+        // The camera starts again for the video stream: not during a scan.
+        videoCheck.isEnabled = state == State.IDLE && cameraReady
         videoButton.isEnabled = state == State.IDLE || state == State.VIDEO_SCAN
         cameraButton.setText(if (state == State.CAMERA_SCAN) R.string.button_stop else R.string.button_camera)
         videoButton.setText(if (state == State.VIDEO_SCAN) R.string.button_cancel else R.string.button_video)
@@ -348,7 +400,11 @@ class MainActivity : ComponentActivity() {
     // endregion: the screen
 
     private companion object {
+        const val LOG_TAG = "fastscan"
         const val PDF_MIME_TYPE = "application/pdf"
+
+        /** The name of the video file of a scan, with the date and the time of its start. */
+        const val VIDEO_FILE_NAME = "scan-%1\$tY%1\$tm%1\$td-%1\$tH%1\$tM%1\$tS.mp4"
         const val VIDEO_MIME_TYPE = "video/*"
         const val PERCENT = 100
 
