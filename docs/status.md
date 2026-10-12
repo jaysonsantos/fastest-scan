@@ -199,8 +199,10 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
      parts of it.
 9. **The Android app** (decision 0019, `docs/android.md`). The app scans a
    recorded video on a phone. With the camera, the app runs, the screen turns
-   with the phone, and the frames have 2880 x 2160 pixels. No scan of a whole
-   book with the camera is verified yet. What is left, in this order:
+   with the phone, and the frames have 2880 x 2160 pixels. One scan with the
+   camera is verified: one page of a book on a white desk (decision 0026). No
+   scan of a whole book with the camera is verified yet. What is left, in this
+   order:
    - Scan a real book with the camera of the phone. Check the frame rate that
      CameraX gives, the colours, and the page outline on the preview.
    - Bring the memory down: 1.1 GB of native memory on the phone is much. Run

@@ -154,6 +154,12 @@ All runs on 2026-10-12, on the desktop.
   frames of the benchmark change. So the colour rule stays.
 - In stream mode, the desk recording takes 28.5 ms for each frame on the
   desktop: each frame runs the three rules.
+- The app on the phone (a REDMI Note 15 Pro+ 5G, on its side, frames of 2880 x
+  2160 pixels from the camera) shows the same scene: the outline is on the page
+  of the book, and it turns green after the view is steady. After "Stop", the
+  scan has 1 page, the page of the book. Before, the outline was around the
+  desk, and the count of spreads went up with no page turn. The time for a
+  frame on the phone was not measured.
 
 The page counts of the PUCIT videos show a fault of decision 0024, not of this
 decision: see "Limits".
