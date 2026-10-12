@@ -48,7 +48,8 @@ region. Among such frames, the region takes the one that is sharp in the region
 (decision 0016).
 
 A finger that holds the page in all frames gets the colour of the paper around it
-(decision 0014). No page of the benchmark result shows a thumb. Text below a
+(decision 0014). No page of the benchmark result shows a whole thumb; the tip of
+a thumb stays at the bottom edge of 4 pages (decision 0021). Text below a
 finger is lost: `--fingers blank` and `--fingers keep` change the rule.
 
 | Part | State |
@@ -71,7 +72,7 @@ finger is lost: `--fingers blank` and `--fingers keep` change the rule.
 | `register.zig`: tile alignment on a pyramid, robust plane transform | Done, tested |
 | `dedup.zig`: spreads that register with each other are one spread | Done, tested. Removes the 10 duplicate views of the benchmark. |
 | `fuse.zig`: repair of the reference page with donor frames, with a patch check against the reference | Works on the benchmark, with the problems below. Tested with synthetic pages. |
-| `finger.zig`: the finger mask of a frame (skin, a wide blob from a border, margin, halo), and the paint over a finger that stays | Works on the benchmark. Tested with synthetic pages. The skin numbers come from the benchmark and from the hands of six public videos (decision 0018). |
+| `finger.zig`: the finger mask of a frame (skin, a wide blob from a border, margin, halo), and the paint over a finger that stays | Works on the benchmark. Tested with synthetic pages. The skin numbers come from the benchmark and from the hands of six public videos (decision 0018). The sizes follow the page width (decision 0021). |
 | `timeline.chooseReference`: the reference frame of each page by the ink that it shows | Done, tested |
 | `timeline.selectDonors`: donor frames by what they repair, also frames that cut a page | Done, tested |
 | `render.alignDonor`: registration of a donor in rounds | Done. No test for the rounds alone. |
@@ -111,9 +112,11 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
      bends. Use a shift per part of the region.
    - A finer glare mask: `docs/research/fusion-prototype.md` repairs single words
      that the 8 px cells here do not find.
-   - Fingers: done (decisions 0014 and 0018). What is left: a video of the user
-     in other light, sizes that scale with the page width for videos below
-     1080p, and a thin strip of the desk at a page edge.
+   - Fingers: done (decisions 0014, 0018, and 0021). What is left: a video of
+     the user in other light, and the thin things at a page edge: the tip of a
+     thumb on 4 pages of the benchmark, and a strip of the desk. A core of 1
+     cell removes them in an experiment, and it changes 53 of the 63 pages: each
+     page needs a look first (decision 0021).
 5. **Speed.** Done in a third form. Decision 0015: a donor frame takes the page
    corners of the first pass, and the warp, the registration, and the flatten
    step have vector code. Decision 0017: each worker keeps its large blocks of
@@ -166,8 +169,9 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
   that touches the page border counts as a finger.
 - **A whole hand on a page stays.** A finger mask larger than 15 % of the page is
   not painted.
-- **Small videos.** The sizes of the finger rule are in cells of 8 pixels. On a
-  page below about 640 pixels in width, thin fingers stay.
+- **The tip of a thumb at a page edge.** A finger that is thinner than a wide
+  blob stays: on 4 pages of the benchmark, a thumb tip shows at the bottom edge.
+  The verbose count of the fingers that stay does not have it.
 - **A copy of the benchmark at 1920 x 1080 gives 64 pages**, one duplicate spread
   more than at the full size.
 - **A page that moves.** The page "Vielen Dank" (page 14) lifts from the desk in

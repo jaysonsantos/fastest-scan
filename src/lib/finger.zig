@@ -143,6 +143,40 @@ pub const Options = struct {
     /// In a cell with ink, the paint does not touch a pixel with a luma below
     /// this: the pixel is ink.
     ink_pixel_luma: f32 = 0.75,
+
+    /// The sizes in cells of this struct hold for a page of this width, in
+    /// pixels: the page of the benchmark video. For a page of another width,
+    /// `find` and `paint` change them in proportion, so a finger covers the same
+    /// number of cells in terms of the page. 0 keeps the sizes as they are.
+    reference_page_width: f32 = 1292,
+
+    /// The options with each size in cells changed for the page of `grid`. A
+    /// distance changes with the page width, and a number of cells with its
+    /// square. A size stays 1 or more, and a size of 0 stays 0.
+    pub fn forGrid(self: Options, grid: Grid) Options {
+        if (self.reference_page_width <= 0) return self;
+        const page_width: f32 = @floatFromInt(grid.width * grid.cell);
+        const scale = page_width / self.reference_page_width;
+        var sized = self;
+        // The sizes of the result are final: a second call changes nothing.
+        sized.reference_page_width = 0;
+        sized.core_cells = scaledSize(u8, self.core_cells, scale);
+        sized.margin_cells = scaledSize(u8, self.margin_cells, scale);
+        sized.halo_cells = scaledSize(u8, self.halo_cells, scale);
+        sized.edge_cells = scaledSize(u8, self.edge_cells, scale);
+        sized.ring_cells = scaledSize(u8, self.ring_cells, scale);
+        sized.page_border_cells = scaledSize(u8, self.page_border_cells, scale);
+        sized.max_hole_cells = scaledSize(u16, self.max_hole_cells, scale * scale);
+        sized.min_blank_cells = scaledSize(u8, self.min_blank_cells, scale * scale);
+        sized.max_ink_cells = scaledSize(u8, self.max_ink_cells, scale * scale);
+        return sized;
+    }
+
+    fn scaledSize(comptime T: type, cells: T, factor: f32) T {
+        if (cells == 0) return 0;
+        const scaled = @round(@as(f32, @floatFromInt(cells)) * factor);
+        return @intFromFloat(std.math.clamp(scaled, 1, @as(f32, @floatFromInt(std.math.maxInt(T)))));
+    }
 };
 
 /// The grid of comparison cells of a page.
@@ -395,8 +429,9 @@ pub fn find(
     colors: CellColors,
     no_data: []const bool,
     grid: Grid,
-    options: Options,
+    given_options: Options,
 ) Allocator.Error!Mask {
+    const options = given_options.forGrid(grid);
     const count = grid.count();
     const skin = try allocator.alloc(bool, count);
     errdefer allocator.free(skin);
@@ -562,9 +597,10 @@ pub fn paint(
     finger: []const bool,
     skin: []const bool,
     grid: Grid,
-    options: Options,
+    given_options: Options,
     outcome: []Outcome,
 ) Allocator.Error!void {
+    const options = given_options.forGrid(grid);
     if (options.paint == .none) {
         for (outcome, finger) |*result, is_finger| result.* = if (is_finger) .left else .none;
         return;
@@ -816,11 +852,14 @@ fn neighbourLabel(labels: []const u16, distance: []const u8, grid: Grid, x: usiz
 const testing = std.testing;
 
 const test_cell = 8;
+const test_page_width = 320;
+/// The tests give the sizes in cells of their small page.
+const test_options: Options = .{ .reference_page_width = test_page_width };
 const test_skin = [channels]f32{ 0.7, 0.45, 0.4 };
 const test_dark_skin = [channels]f32{ 0.3, 0.2, 0.15 };
 
 fn testPage(allocator: Allocator) !RgbF32 {
-    const page = try RgbF32.init(allocator, 320, 400);
+    const page = try RgbF32.init(allocator, test_page_width, 400);
     for (page.data) |*value| value.* = 1.0;
     return page;
 }
@@ -852,7 +891,7 @@ fn testFind(page: RgbF32, outside: ?Plane) !Mask {
     }
     const colors = try measure(testing.allocator, page, outside, grid);
     defer colors.deinit(testing.allocator);
-    return find(testing.allocator, colors, no_data, grid, .{});
+    return find(testing.allocator, colors, no_data, grid, test_options);
 }
 
 fn cellAt(page: RgbF32, x: usize, y: usize) usize {
@@ -935,6 +974,64 @@ test "a dark cell is skin only when it is more red than yellow" {
     try testing.expect(isSkin(.{ 0.62, 0.46, 0.28 }, no_texture, options));
 }
 
+test "the sizes in cells follow the width of the page" {
+    const options: Options = .{};
+    const reference: Grid = .{ .width = 162, .height = 234, .cell = 8 };
+    // The page of the benchmark video: no size changes.
+    const same = options.forGrid(reference);
+    try testing.expectEqual(options.core_cells, same.core_cells);
+    try testing.expectEqual(options.margin_cells, same.margin_cells);
+    try testing.expectEqual(options.halo_cells, same.halo_cells);
+    try testing.expectEqual(options.max_hole_cells, same.max_hole_cells);
+    try testing.expectEqual(options.min_blank_cells, same.min_blank_cells);
+
+    // A page of half the width: half the distances, a quarter of the cell counts.
+    const half = options.forGrid(.{ .width = 81, .height = 117, .cell = 8 });
+    try testing.expectEqual(@as(u8, 1), half.core_cells);
+    try testing.expectEqual(@as(u8, 5), half.halo_cells);
+    try testing.expectEqual(@as(u16, 12), half.max_hole_cells);
+    try testing.expectEqual(@as(u8, 2), half.min_blank_cells);
+    // A second call changes nothing.
+    try testing.expectEqual(half, half.forGrid(reference));
+
+    // A very small page: each size stays 1 or more, and a size of 0 stays 0.
+    var no_halo = options;
+    no_halo.halo_cells = 0;
+    const small = no_halo.forGrid(.{ .width = 20, .height = 25, .cell = 8 });
+    try testing.expectEqual(@as(u8, 1), small.core_cells);
+    try testing.expectEqual(@as(u8, 1), small.margin_cells);
+    try testing.expectEqual(@as(u8, 0), small.halo_cells);
+    try testing.expectEqual(@as(u16, 1), small.max_hole_cells);
+
+    // With no reference width, the sizes are as given.
+    var fixed = options;
+    fixed.reference_page_width = 0;
+    try testing.expectEqual(fixed, fixed.forGrid(.{ .width = 20, .height = 25, .cell = 8 }));
+}
+
+test "on a small page, a thin finger is a finger" {
+    const page = try testPage(testing.allocator);
+    defer page.deinit(testing.allocator);
+    // A finger of 3 cells in width. On the page of the benchmark video, which is
+    // 4 times as wide, a finger of the same part of the page has 12 cells.
+    fill(page, 0, 80, 200, 224, test_skin);
+    const grid = Grid.init(page, test_cell);
+    const no_data = try testing.allocator.alloc(bool, grid.count());
+    defer testing.allocator.free(no_data);
+    @memset(no_data, false);
+    const colors = try measure(testing.allocator, page, null, grid);
+    defer colors.deinit(testing.allocator);
+
+    const scaled = try find(testing.allocator, colors, no_data, grid, .{});
+    defer scaled.deinit(testing.allocator);
+    try testing.expect(scaled.finger[cellAt(page, 40, 212)]);
+
+    // With the sizes for the page of the benchmark video, the finger is too thin.
+    const fixed = try find(testing.allocator, colors, no_data, grid, .{ .reference_page_width = 0 });
+    defer fixed.deinit(testing.allocator);
+    try testing.expect(!fixed.finger[cellAt(page, 40, 212)]);
+}
+
 test "a thin strip of the desk at the edge of the page is not a finger" {
     const page = try testPage(testing.allocator);
     defer page.deinit(testing.allocator);
@@ -983,7 +1080,9 @@ fn testPaint(page: RgbF32, options: Options, outcome: []Outcome) !void {
     const grid = Grid.init(page, test_cell);
     const mask = try testFind(page, null);
     defer mask.deinit(testing.allocator);
-    try paint(testing.allocator, page, null, mask.covered, mask.finger, mask.skin, grid, options, outcome);
+    var sized = options;
+    sized.reference_page_width = test_page_width;
+    try paint(testing.allocator, page, null, mask.covered, mask.finger, mask.skin, grid, sized, outcome);
 }
 
 test "a finger with blank paper around it gets the colour of the paper" {
@@ -1095,7 +1194,7 @@ test "the paint does not touch a cell that is not in its list" {
     const outcome = try testing.allocator.alloc(Outcome, grid.count());
     defer testing.allocator.free(outcome);
 
-    try paint(testing.allocator, page, null, left, finger, mask.skin, grid, .{}, outcome);
+    try paint(testing.allocator, page, null, left, finger, mask.skin, grid, test_options, outcome);
     try testing.expectEqual(Outcome.none, outcome[cellAt(page, 110, 360)]);
     try testing.expectApproxEqAbs(test_skin[0], page.pixel(108, 360)[0], 0.001);
     try testing.expectEqual(Outcome.painted, outcome[cellAt(page, 170, 360)]);

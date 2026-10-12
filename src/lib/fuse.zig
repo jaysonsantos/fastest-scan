@@ -1240,9 +1240,16 @@ const min_ring_variance = 4.0;
 
 const testing = std.testing;
 
+const test_page_width = 160;
+/// The page of the tests with a finger: a finger needs more space.
+const test_finger_page_width = 320;
+/// The tests give the sizes of the finger rule in cells of their small page.
+const test_options: Options = .{ .finger = .{ .reference_page_width = test_page_width } };
+const test_finger_options: Options = .{ .finger = .{ .reference_page_width = test_finger_page_width } };
+
 /// A page with a dark bar on white paper.
 fn testPage(allocator: Allocator) !RgbF32 {
-    const page = try RgbF32.init(allocator, 160, 200);
+    const page = try RgbF32.init(allocator, test_page_width, 200);
     for (0..page.height) |y| {
         for (0..page.width) |x| {
             const ink = y >= 60 and y < 100 and x >= 20 and x < 140;
@@ -1283,7 +1290,7 @@ test "glare on the reference goes away with clean donors" {
     fillGlare(pages[2], 100, 140, 60, 100);
 
     const layers = [_]Layer{ .{ .page = pages[0] }, .{ .page = pages[1] }, .{ .page = pages[2] }, .{ .page = pages[3] } };
-    const stats = try fuse(testing.allocator, &layers, .{}, null);
+    const stats = try fuse(testing.allocator, &layers, test_options, null);
     try testing.expect(stats.glare > 0.03);
     try testing.expectEqual(@as(f32, 0), stats.cover);
     try testing.expect(stats.unrepaired < 0.005);
@@ -1301,7 +1308,7 @@ test "glare in most frames goes away with one clean donor" {
     for ([_]usize{ 0, 1, 2 }) |index| fillGlare(pages[index], 40, 90, 60, 100);
 
     const layers = [_]Layer{ .{ .page = pages[0] }, .{ .page = pages[1] }, .{ .page = pages[2] }, .{ .page = pages[3] }, .{ .page = pages[4] } };
-    _ = try fuse(testing.allocator, &layers, .{}, null);
+    _ = try fuse(testing.allocator, &layers, test_options, null);
     try testing.expectApproxEqAbs(@as(f32, 0.15), pages[0].pixel(65, 80)[1], 0.02);
 }
 
@@ -1315,7 +1322,7 @@ test "a finger on the reference goes away, a finger in all frames stays" {
     for (pages) |page| fillFinger(page, 96, 152, 152, 200);
 
     const layers = [_]Layer{ .{ .page = pages[0] }, .{ .page = pages[1] }, .{ .page = pages[2] }, .{ .page = pages[3] } };
-    const stats = try fuse(testing.allocator, &layers, .{ .finger = .{ .paint = .none } }, null);
+    const stats = try fuse(testing.allocator, &layers, .{ .finger = .{ .paint = .none, .reference_page_width = test_page_width } }, null);
     try testing.expect(stats.cover > 0.03);
     try testing.expectEqual(@as(f32, 0), stats.painted);
     try testing.expect(stats.finger_left > 0.03);
@@ -1333,7 +1340,7 @@ test "a finger in the donor frames does not come onto a clean reference" {
     defer testing.allocator.free(before);
 
     const layers = [_]Layer{ .{ .page = pages[0] }, .{ .page = pages[1] }, .{ .page = pages[2] }, .{ .page = pages[3] } };
-    _ = try fuse(testing.allocator, &layers, .{}, null);
+    _ = try fuse(testing.allocator, &layers, test_options, null);
     try testing.expectEqualSlices(f32, before, pages[0].data);
 }
 
@@ -1353,7 +1360,7 @@ test "a finger in a donor frame that the frame cuts does not come onto the refer
     defer testing.allocator.free(before);
 
     const layers = [_]Layer{ .{ .page = pages[0] }, .{ .page = pages[1], .outside = masks[0] }, .{ .page = pages[2], .outside = masks[1] } };
-    _ = try fuse(testing.allocator, &layers, .{}, null);
+    _ = try fuse(testing.allocator, &layers, test_options, null);
     try testing.expectEqualSlices(f32, before, pages[0].data);
 }
 
@@ -1361,7 +1368,7 @@ test "a finger in all frames with blank paper around it gets the colour of the p
     // A page that is large enough for a finger to be a small part of it.
     var pages: [3]RgbF32 = undefined;
     for (&pages) |*page| {
-        page.* = try RgbF32.init(testing.allocator, 320, 400);
+        page.* = try RgbF32.init(testing.allocator, test_finger_page_width, 400);
         for (page.data) |*value| value.* = 1.0;
         fillRect(page.*, 40, 280, 100, 140, 0.15);
         fillFinger(page.*, 128, 192, 336, 400);
@@ -1371,7 +1378,7 @@ test "a finger in all frames with blank paper around it gets the colour of the p
     const layers = [_]Layer{ .{ .page = pages[0] }, .{ .page = pages[1] }, .{ .page = pages[2] } };
     var map: ?FaultMap = null;
     defer if (map) |found| found.deinit(testing.allocator);
-    const stats = try fuse(testing.allocator, &layers, .{}, &map);
+    const stats = try fuse(testing.allocator, &layers, test_finger_options, &map);
     try testing.expect(stats.painted > 0.03);
     try testing.expectEqual(@as(f32, 0), stats.finger_left);
     try testing.expectApproxEqAbs(@as(f32, 1.0), pages[0].pixel(160, 360)[1], 0.02);
@@ -1382,12 +1389,12 @@ test "a finger in all frames with blank paper around it gets the colour of the p
 }
 
 test "a finger alone on a page with no other frame gets the colour of the paper" {
-    const page = try RgbF32.init(testing.allocator, 320, 400);
+    const page = try RgbF32.init(testing.allocator, test_finger_page_width, 400);
     defer page.deinit(testing.allocator);
     for (page.data) |*value| value.* = 1.0;
     fillFinger(page, 128, 192, 336, 400);
 
-    const stats = try fuse(testing.allocator, &.{.{ .page = page }}, .{}, null);
+    const stats = try fuse(testing.allocator, &.{.{ .page = page }}, test_finger_options, null);
     try testing.expect(stats.painted > 0.03);
     try testing.expectApproxEqAbs(@as(f32, 1.0), page.pixel(160, 360)[1], 0.02);
 }
@@ -1407,7 +1414,7 @@ test "a part outside the reference frame comes from one donor" {
     fillRect(pages[1], 60, 100, 10, 30, 0.2);
 
     const layers = [_]Layer{ .{ .page = pages[0], .outside = outside }, .{ .page = pages[1] } };
-    const stats = try fuse(testing.allocator, &layers, .{}, null);
+    const stats = try fuse(testing.allocator, &layers, test_options, null);
     try testing.expect(stats.outside > 0.2);
     try testing.expect(stats.unrepaired < 0.01);
     try testing.expectApproxEqAbs(@as(f32, 0.2), pages[0].pixel(80, 20)[1], 0.02);
@@ -1422,7 +1429,7 @@ test "frames that agree change nothing" {
     const before = try testing.allocator.dupe(f32, pages[0].data);
     defer testing.allocator.free(before);
     const layers = [_]Layer{ .{ .page = pages[0] }, .{ .page = pages[1] }, .{ .page = pages[2] } };
-    const stats = try fuse(testing.allocator, &layers, .{}, null);
+    const stats = try fuse(testing.allocator, &layers, test_options, null);
     try testing.expectEqual(@as(f32, 0), stats.repaired());
     try testing.expectEqualSlices(f32, before, pages[0].data);
 }
@@ -1441,7 +1448,7 @@ test "glare on a dark bar goes away when it leaves dark specks" {
     }
 
     const layers = [_]Layer{ .{ .page = pages[0] }, .{ .page = pages[1] }, .{ .page = pages[2] }, .{ .page = pages[3] } };
-    const stats = try fuse(testing.allocator, &layers, .{}, null);
+    const stats = try fuse(testing.allocator, &layers, test_options, null);
     try testing.expect(stats.glare > 0.03);
     try testing.expectApproxEqAbs(@as(f32, 0.15), pages[0].pixel(70, 81)[1], 0.03);
     // The paper next to the bar stays as it is.
@@ -1497,7 +1504,7 @@ test "glare with a tint on a dark bar goes away when one frame alone shows the b
     }
 
     const layers = [_]Layer{ .{ .page = pages[0] }, .{ .page = pages[1] }, .{ .page = pages[2] }, .{ .page = pages[3] }, .{ .page = pages[4] } };
-    const stats = try fuse(testing.allocator, &layers, .{}, null);
+    const stats = try fuse(testing.allocator, &layers, test_options, null);
     try testing.expect(stats.glare > 0.03);
     try testing.expect(stats.unrepaired < 0.005);
     for (pages[0].pixel(65, 80)) |value| try testing.expectApproxEqAbs(@as(f32, 0.15), value, 0.02);
@@ -1516,7 +1523,7 @@ test "a donor that lies some pixels off repairs the page at the right place" {
     fillGlare(pages[0], 48, 104, 56, 96);
 
     const layers = [_]Layer{ .{ .page = pages[0] }, .{ .page = pages[1] }, .{ .page = pages[2] }, .{ .page = pages[3] } };
-    const stats = try fuse(testing.allocator, &layers, .{}, null);
+    const stats = try fuse(testing.allocator, &layers, test_options, null);
     try testing.expect(stats.glare > 0.02);
     try testing.expectEqual(@as(f32, 0), stats.rejected);
     // The words under the glare are back where they are on the page. A copy of the
@@ -1542,7 +1549,7 @@ test "among the donors that agree, a region takes the one that is sharp in the r
     }
 
     const layers = [_]Layer{ .{ .page = pages[0] }, .{ .page = pages[1] }, .{ .page = pages[2] } };
-    const stats = try fuse(testing.allocator, &layers, .{}, null);
+    const stats = try fuse(testing.allocator, &layers, test_options, null);
     try testing.expect(stats.glare > 0.02);
     try testing.expectEqual(@as(f32, 0), stats.rejected);
     // The sharp words are back. The blurred donor leaves a mean difference of
@@ -1565,7 +1572,7 @@ test "a donor that shows other content around the fault repairs nothing" {
     defer before.deinit(testing.allocator);
 
     const layers = [_]Layer{ .{ .page = pages[0] }, .{ .page = pages[1] }, .{ .page = pages[2] }, .{ .page = pages[3] } };
-    const stats = try fuse(testing.allocator, &layers, .{}, null);
+    const stats = try fuse(testing.allocator, &layers, test_options, null);
     try testing.expect(stats.rejected > 0.02);
     // The glare stays: the words of another page do not come into it.
     try testing.expectEqual(@as(f32, 0), meanDifference(pages[0], before, 56, 96, 60, 92));
@@ -1586,7 +1593,7 @@ test "a dark bar with a warm tint that the donors show too is not a finger" {
     defer testing.allocator.free(before);
 
     const layers = [_]Layer{ .{ .page = pages[0] }, .{ .page = pages[1] }, .{ .page = pages[2] }, .{ .page = pages[3] } };
-    const stats = try fuse(testing.allocator, &layers, .{}, null);
+    const stats = try fuse(testing.allocator, &layers, test_options, null);
     try testing.expectEqual(@as(f32, 0), stats.cover);
     try testing.expectEqualSlices(f32, before, pages[0].data);
 }

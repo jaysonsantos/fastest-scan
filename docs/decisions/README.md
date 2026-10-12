@@ -25,3 +25,4 @@ replaces it and name the old file in the new one.
 | [0017](0017-worker-memory-from-a-block-cache.md) | A worker keeps its large blocks of memory |
 | [0018](0018-skin-test-for-dark-hands.md) | The skin test accepts dark hands and skin in a shadow |
 | [0020](0020-one-thread-per-decoder.md) | A decoder has one thread and gives only the frames that a job needs |
+| [0021](0021-finger-sizes-follow-the-page-width.md) | The sizes of the finger rule follow the page width |
