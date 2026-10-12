@@ -191,8 +191,8 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
    - No list reserves its capacity, and `pdf.Writer` keeps its allocator.
    - The tests that make each allocation fail (`alloc_check.eachFailure`)
      cover the entry points that the CLI calls. They found no more memory that
-     stays. `detect.zig` has no test of its own: the tests of `observe.zig` and
-     `render.zig` run it.
+     stays. `detect.zig` has such a test for the outline search only: the tests
+     of `observe.zig` and `render.zig` run the other parts of it.
 9. **The Android app** (decision 0019, `docs/android.md`). The app scans a
    recorded video on a phone. What is left, in this order:
    - Scan a real book with the camera of the phone. Check the frame size and the
