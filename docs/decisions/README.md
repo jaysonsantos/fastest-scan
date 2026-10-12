@@ -27,3 +27,4 @@ replaces it and name the old file in the new one.
 | [0020](0020-one-thread-per-decoder.md) | A decoder has one thread and gives only the frames that a job needs |
 | [0021](0021-finger-sizes-follow-the-page-width.md) | The sizes of the finger rule follow the page width |
 | [0022](0022-thin-blob-of-lit-skin.md) | A thin blob of skin in the light is a finger |
+| [0023](0023-no-decoder-cost-in-the-donor-choice.md) | The donor choice has no decoder cost |

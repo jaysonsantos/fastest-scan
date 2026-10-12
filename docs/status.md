@@ -128,9 +128,10 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
    - The decode is the largest part. The analysis pass must decode each frame
      (377 s of CPU time): the frames of this video are all reference frames, and
      the hardware decoder is not faster than the CPU threads. The render pass
-     decodes 2622 frames for the 425 that it needs. Ideas: a cost per frame in
-     `timeline.selectDonors`, hardware and CPU decoders at the same time, or one
-     pass over the video (the stream session of the branch `android-app`).
+     decodes 2622 frames for the 425 that it needs. A decoder cost in the donor
+     choice saves 1 % of the run: decision 0023 has the numbers. Ideas: hardware
+     and CPU decoders at the same time, or one pass over the video (the stream
+     session of the branch `android-app`).
    - The page warp is about 40 % of the CPU time of the program itself. The
      donors need the cubic only in the regions that they repair: a cheap warp can
      give the cell values.
