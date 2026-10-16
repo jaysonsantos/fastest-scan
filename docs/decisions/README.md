@@ -36,3 +36,4 @@ replaces it and name the old file in the new one.
 | [0028](0028-page-that-is-not-white-paper.md) | A page that is not white paper is a page too |
 | [0029](0029-a-line-is-the-edge-that-it-came-from.md) | A line of the line search is the edge that it came from |
 | [0030](0030-open-book-with-no-white-page.md) | An open book with no page of white paper |
+| [0031](0031-print-on-blank-paper.md) | Print on blank paper makes two pages different |

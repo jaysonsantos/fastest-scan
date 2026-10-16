@@ -999,8 +999,10 @@ pub fn renderDocument(
             .quality = result.quality,
             .weak = segment.weak,
         };
-        for (&candidate.signatures, 0..) |*plane, page_index| {
-            plane.* = signature.pages[if (page_index < signature.page_count) page_index else 0].view();
+        for (&candidate.signatures, &candidate.hidden, 0..) |*plane, *hidden, page_index| {
+            const source = if (page_index < signature.page_count) page_index else 0;
+            plane.* = signature.pages[source].view();
+            hidden.* = signature.hidden[source].view();
         }
         try candidates.append(gpa, candidate);
         try candidate_segments.append(gpa, @intCast(segment_index));
@@ -1167,15 +1169,17 @@ fn writeDuplicateTable(
 ) !void {
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(gpa);
-    try text.appendSlice(gpa, "first_segment,second_segment,same,matched_page_0,matched_page_1\n");
-    var line_buffer: [128]u8 = undefined;
+    try text.appendSlice(gpa, "first_segment,second_segment,same,matched_page_0,matched_page_1,print_on_blank_page_0,print_on_blank_page_1\n");
+    var line_buffer: [160]u8 = undefined;
     for (comparisons) |comparison| {
-        try text.appendSlice(gpa, try std.mem.print(&line_buffer, "{d},{d},{d},{d:.3},{d:.3}\n", .{
+        try text.appendSlice(gpa, try std.mem.print(&line_buffer, "{d},{d},{d},{d:.3},{d:.3},{d:.3},{d:.3}\n", .{
             candidate_segments[comparison.first],
             candidate_segments[comparison.second],
             @intFromBool(comparison.same),
             comparison.matched[0],
             comparison.matched[1],
+            comparison.print_on_blank[0],
+            comparison.print_on_blank[1],
         }));
     }
     try text.appendSlice(gpa, "kept_segments");

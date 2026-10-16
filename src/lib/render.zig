@@ -13,6 +13,7 @@ const enhance = @import("enhance.zig");
 const jpeg = @import("jpeg.zig");
 const register = @import("register.zig");
 const fuse = @import("fuse.zig");
+const finger = @import("finger.zig");
 const curl = @import("curl.zig");
 
 const Quad = geometry.Quad;
@@ -137,6 +138,10 @@ pub const RenderedSpread = struct {
 pub const SpreadSignature = struct {
     /// The luma of each enhanced page at half the page size.
     pages: [detect.max_pages]image.Plane,
+    /// For each page, a value that is not zero for each pixel that does not show
+    /// the paper: outside the frame, or a finger with its halo. The enhancement
+    /// makes a finger white like blank paper.
+    hidden: [detect.max_pages]image.Plane,
     page_count: u8,
     redetected: bool,
     /// The largest fraction of a page that lies outside the frame.
@@ -145,7 +150,10 @@ pub const SpreadSignature = struct {
     clipped_edge_count: u8,
 
     pub fn deinit(self: SpreadSignature, allocator: Allocator) void {
-        for (self.pages[0..self.page_count]) |page| page.deinit(allocator);
+        for (self.pages[0..self.page_count], self.hidden[0..self.page_count]) |page, hidden| {
+            page.deinit(allocator);
+            hidden.deinit(allocator);
+        }
     }
 };
 
@@ -305,6 +313,7 @@ pub fn renderSignature(
     const half: image.Size = .{ .width = @max(1, page_size.width / 2), .height = @max(1, page_size.height / 2) };
     var signature: SpreadSignature = .{
         .pages = undefined,
+        .hidden = undefined,
         .page_count = 0,
         .redetected = layout.redetected,
         .outside_fraction = 0,
@@ -321,23 +330,48 @@ pub fn renderSignature(
         // No sharpening: the registration compares the structure, not fine edges.
         var enhance_options = options.enhance;
         enhance_options.sharpen_amount = 0;
+        const finger_grid = finger.Grid.init(warped, options.fuse.cell);
+        var fingers: ?finger.Mask = null;
+        defer if (fingers) |mask| mask.deinit(scratch);
         if (layout.colored[index]) {
             if (try lightOfSpread(scratch, reference.frame, &layout, kind, index, page_size, options)) |paper| {
                 enhance.balance(warped, paper, enhance_options);
             }
             try enhance.finish(scratch, warped, enhance_options);
         } else {
-            try enhance.enhance(scratch, warped, enhance_options);
+            try enhance.flatten(scratch, warped, enhance_options);
+            // The finger search needs the flattened page: blank paper at 1.0.
+            const colors = try finger.measure(scratch, warped, outside, finger_grid);
+            defer colors.deinit(scratch);
+            const no_data = try scratch.alloc(bool, finger_grid.count());
+            defer scratch.free(no_data);
+            for (no_data, colors.contrast) |*missing, contrast| missing.* = std.math.isNan(contrast);
+            fingers = try finger.find(scratch, colors, no_data, finger_grid, options.fuse.finger);
+            try enhance.finish(scratch, warped, enhance_options);
         }
 
         const luma = try lumaPlane(allocator, warped);
+        errdefer luma.deinit(allocator);
+        const hidden = try image.Plane.initFilled(allocator, half.width, half.height, 0);
         var outside_count: usize = 0;
-        for (outside.data, luma.data) |is_outside, *value| {
+        for (outside.data, luma.data, hidden.data) |is_outside, *value, *is_hidden| {
             if (is_outside == 0) continue;
             outside_count += 1;
             value.* = white;
+            is_hidden.* = 1;
+        }
+        if (fingers) |mask| {
+            for (mask.covered, 0..) |covered, cell| {
+                if (!covered) continue;
+                const x_start = (cell % finger_grid.width) * finger_grid.cell;
+                const y_start = (cell / finger_grid.width) * finger_grid.cell;
+                for (y_start..@min(y_start + finger_grid.cell, hidden.height)) |y| {
+                    @memset(hidden.row(y)[x_start..@min(x_start + finger_grid.cell, hidden.width)], 1);
+                }
+            }
         }
         signature.pages[signature.page_count] = luma;
+        signature.hidden[signature.page_count] = hidden;
         signature.page_count += 1;
         signature.outside_fraction = @max(
             signature.outside_fraction,

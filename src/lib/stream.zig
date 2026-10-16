@@ -1150,8 +1150,10 @@ pub const Stream = struct {
                 clipped_quality_weight * @as(f32, @floatFromInt(signature.clipped_edge_count)),
             .weak = spread.segment.weak,
         };
-        for (&candidate.signatures, 0..) |*plane, page_index| {
-            plane.* = signature.pages[if (page_index < signature.page_count) page_index else 0].view();
+        for (&candidate.signatures, &candidate.hidden, 0..) |*plane, *hidden, page_index| {
+            const source = if (page_index < signature.page_count) page_index else 0;
+            plane.* = signature.pages[source].view();
+            hidden.* = signature.hidden[source].view();
         }
         const decision = try self.resolver.add(gpa, id, candidate, null);
         switch (decision) {

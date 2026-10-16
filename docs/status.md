@@ -90,7 +90,7 @@ finger is lost: `--fingers blank` and `--fingers keep` change the rule.
 | `render.zig`: detect at full size, warp, enhance, JPEG | Done, tested |
 | CLI: arguments, `ffprobe`, parallel `ffmpeg` readers, analysis pass, render pass, PDF, frame cache, debug pictures | Done |
 | `register.zig`: tile alignment on a pyramid, robust plane transform | Done, tested |
-| `dedup.zig`: spreads that register with each other are one spread | Done, tested. Removes the 10 duplicate views of the benchmark. |
+| `dedup.zig`: spreads that register with each other are one spread | Done, tested. Removes the 10 duplicate views of the benchmark. Two pages that register are different when 25 % of their print or more lies on blank paper of the other page: two pages of one form (decision 0031). |
 | `fuse.zig`: repair of the reference page with donor frames, with a patch check against the reference | Works on the benchmark, with the problems below. Tested with synthetic pages. |
 | `finger.zig`: the finger mask of a frame (skin, a wide blob from a border, margin, halo), and the paint over a finger that stays | Works on the benchmark. Tested with synthetic pages. The skin numbers come from the benchmark and from the hands of six public videos (decision 0018). The sizes follow the page width (decision 0021). Skin in the light can be a thin blob (decision 0022). |
 | `timeline.chooseReference`: the reference frame of each page by the ink that it shows | Done, tested |
@@ -129,6 +129,8 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
    shows each comparison. On the benchmark, two views of one spread match on 42 %
    to 95 % of the textured tiles of a page; two different spreads match on at most
    23 %. The limits are 50 % for the better page and 35 % for the other page.
+   Two pages of one form can match more: decision 0031 adds the test for print
+   on blank paper.
 3. **M2, glare, and M3, fingers and cut pages.** Done in a first form: see "What
    exists" and "Known problems".
 4. **Quality of the fusion.** Done in a second form (decision 0013): a reference
@@ -293,7 +295,10 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
 - **Stream mode: the pages of a spread come one spread late.** A spread is final
   only when the next spread ends.
 - **Stream mode: the page size comes from the first two spreads.** On the
-  benchmark it is 1442 x 2025 pixels; the two passes give 1292 x 1868.
+  benchmark it is 1442 x 2025 pixels; the two passes give 1292 x 1868. When the
+  first two spreads are bad views (a blurred view, a wrong outline), each page
+  gets a wrong size: a phone scan of one letter on 2026-10-14 gave three pages
+  of 1779 x 1944 pixels, and the good page was about 29 % too wide.
 - **Stream mode: a later copy of a spread gives no frames to the first copy.**
   The better copy stays with its own frames.
 - **Stream mode: the memory is high for a phone.** On the desktop, with frames of

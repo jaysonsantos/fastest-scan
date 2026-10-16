@@ -145,19 +145,21 @@ pub const ShiftGrid = struct {
 
 // region: tile statistics
 
-const TileStats = struct {
+pub const TileStats = struct {
     sum: u32,
     sum_squares: u64,
     count: u32,
 
-    fn variance(self: TileStats) f32 {
+    pub fn variance(self: TileStats) f32 {
         const n: f64 = @floatFromInt(self.count);
         const mean = @as(f64, @floatFromInt(self.sum)) / n;
         return @floatCast(@max(0, @as(f64, @floatFromInt(self.sum_squares)) / n - mean * mean));
     }
 };
 
-fn tileStats(plane: PlaneView, x: usize, y: usize, side: usize) TileStats {
+/// The statistics of the square tile with its top left corner at (x, y). The tile
+/// must lie inside the plane.
+pub fn tileStats(plane: PlaneView, x: usize, y: usize, side: usize) TileStats {
     var sum: u32 = 0;
     var sum_squares: u64 = 0;
     for (0..side) |row| {
