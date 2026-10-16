@@ -36,5 +36,18 @@
                 <data android:mimeType="video/*" />
             </intent-filter>
         </activity>
+
+        <!-- The one FileProvider of the app: it gives a file of the app to another
+            app, for example a PDF to share. res/xml/file_paths.xml has a directory
+            for each use. MainActivity.FILE_PROVIDER_SUFFIX has the same authority. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

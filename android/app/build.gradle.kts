@@ -79,6 +79,11 @@ dependencies {
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.video)
     implementation(libs.androidx.camera.view)
+    // ContextCompat, and the FileProvider for the share of a PDF.
+    implementation(libs.androidx.core)
+
+    // The unit tests on the Java machine of the computer: app/src/test.
+    testImplementation(libs.junit)
 
     // The tests that run on a phone or an emulator: app/src/androidTest.
     androidTestImplementation(libs.androidx.test.junit)

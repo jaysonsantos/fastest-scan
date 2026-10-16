@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">fastest-scan</string>
-    <string name="default_file_name">scan.pdf</string>
+    <!-- The name of the PDF when the user gives no other name. -->
+    <string name="default_pdf_name">Scan</string>
     <string name="last_page_description">The last page of the scan</string>
 
     <string name="button_camera">Scan</string>
@@ -9,7 +10,11 @@
     <string name="button_video">Video</string>
     <string name="button_cancel">Cancel</string>
     <string name="button_save">Save PDF</string>
+    <string name="button_share">Share</string>
     <string name="check_video">Keep a video of the scan</string>
+    <string name="check_prefix">Start the name with the date and time</string>
+    <string name="name_hint">Name of the PDF</string>
+    <string name="share_title">Share the PDF</string>
 
     <string name="status_idle">Film the pages of a book, or open a video of them.</string>
     <string name="status_camera_error">The camera does not start: %1$s. You can open a video.</string>

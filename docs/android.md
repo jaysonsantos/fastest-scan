@@ -4,10 +4,11 @@ The app in `android/` scans a book with the camera, or from a recorded video, an
 writes a PDF. It uses the stream session of the library: see
 `docs/decisions/0019-stream-session-for-a-phone.md`.
 
-State on 2026-10-12: the app scans a recorded video on a phone (a REDMI Note 15
+State on 2026-10-16: the app scans a recorded video on a phone (a REDMI Note 15
 Pro+ 5G) and on the Android emulator. The benchmark video gives its 63 pages on
-the two, and the PDF is correct. **No real book was scanned with the camera.** The
-list of what is not verified is in decision 0019.
+the two, and the PDF is correct. The camera of the phone scanned a paperback,
+letters, and an invoice: decisions 0029 to 0033 use these scans. The list of what
+is not verified is in decision 0019.
 
 ## Parts
 
@@ -17,10 +18,13 @@ list of what is not verified is in decision 0019.
 | `android/app/src/main/cpp/fastscan_jni.c` | The JNI layer: one native function for each C function. |
 | `android/app/src/main/java/.../core/Native.java` | The declarations of the native functions. Java, so that a desktop test can compile it. |
 | `android/app/src/main/java/.../core/ScanSession.kt` | One scan. It keeps the handles and the thread rules of the library. |
+| `android/app/src/main/java/.../core/PdfName.kt` | The rule for the file name of the PDF. It uses no class of Android. |
 | `android/app/src/main/java/.../source/CameraSource.kt` | The camera as a source of frames (CameraX). |
 | `android/app/src/main/java/.../source/VideoFileSource.kt` | A recorded video as a source of frames (`MediaExtractor`, `MediaCodec`). |
 | `android/app/src/main/java/.../ui/` | The one screen of the app, and the page outline on the preview. |
+| `android/app/src/main/res/xml/file_paths.xml` | The directories that the `FileProvider` of the app gives to other apps. |
 | `android/gradle/libs.versions.toml` | The versions of the Android Gradle plugin and of the libraries. |
+| `android/app/src/test/` | The unit tests on the Java machine of the computer. `gradle testDebugUnitTest` runs them. |
 | `android/app/src/androidTest/` | The tests that run on a phone or an emulator. `scripts/test-android.sh` runs them. |
 | `tests/c_api.c` | A C program on the header. `zig build test` runs it. |
 | `tests/jni/NativeSmoke.java` | A Java program on the JNI layer. `scripts/test-jni.sh` runs it. |
@@ -72,6 +76,13 @@ The script has two steps:
 With no NDK, `zig build android` makes only the static libraries in
 `zig-out/android/static/<ABI>/`. They show that the library compiles for the two
 targets.
+
+The unit tests of the app run on the Java machine of the computer, with no device.
+Run them in the Android shell, in `android/`:
+
+```sh
+gradle testDebugUnitTest
+```
 
 Install the app on a phone with USB debugging, or on an emulator that runs:
 
@@ -125,14 +136,23 @@ The install fails when no person answers in about 10 seconds. The script install
 two packages: the app and its tests.
 
 To try the app by hand on a device with no camera scene, give it a video from the
-shell. The app can read a file of its own directory:
+shell. The app can read a file of its own directory. Start the app one time after
+the install: Android makes the directory `files/` of the app at the first start.
+Then copy the video with `run-as`, which works only on a debug build:
 
 ```sh
-adb push video.mp4 /sdcard/Android/data/br.com.jayson.fastestscan/files/video.mp4
+adb push video.mp4 /data/local/tmp/video.mp4
+adb shell run-as br.com.jayson.fastestscan cp /data/local/tmp/video.mp4 files/video.mp4
+adb shell rm /data/local/tmp/video.mp4
 adb shell am start -a android.intent.action.VIEW -t video/mp4 \
-  -d file:///sdcard/Android/data/br.com.jayson.fastestscan/files/video.mp4 \
+  -d file:///data/user/0/br.com.jayson.fastestscan/files/video.mp4 \
   -n br.com.jayson.fastestscan/.ui.MainActivity
 ```
+
+Do not push the video to `/sdcard/Android/data/br.com.jayson.fastestscan/files/`
+on a new install. When `adb` makes that directory, the directory belongs to the
+shell user, and the app cannot read the video: it shows "Failed to instantiate
+extractor".
 
 ## Keep a video of a camera scan
 
@@ -206,6 +226,49 @@ video stream on, the speed of the scan was the same as with it off.
   user can save the PDF.
 - Another app can open a video with this app: the app has a filter for the
   action `VIEW` with a video.
+
+## The name of the PDF
+
+After a scan with pages, the panel shows a name field and a check box. "Save PDF"
+and "Share" use the same file name:
+
+```text
+<prefix> <name>.pdf          for example: 2026-10-15 21-30 Scan.pdf
+```
+
+- The prefix is the local date and time when the user started the scan: the tap
+  on "Scan", or the choice of a video. The format is `yyyy-MM-dd HH-mm`, with
+  ASCII digits also in a language with other digits, for example Arabic.
+- The name is the text of the field. Each new scan sets the field to `Scan`.
+- The check box "Start the name with the date and time" turns the prefix on and
+  off. The app keeps its value in `SharedPreferences`, also after a restart. The
+  default is on.
+- The rule removes `/ \ : * ? " < > |`, the control characters, and the spaces at
+  the two ends. An empty name becomes `Scan`.
+- The part before `.pdf` has at most 100 characters (Unicode code points) and at
+  most 251 bytes in UTF-8. The file systems of Android take a file name of 255
+  bytes at most, and one character can take 4 bytes.
+
+`core/PdfName.kt` has the rule, and `android/app/src/test/` has its unit tests.
+"Save PDF" gives the name to the "create document" dialog of the system. The
+user can change the name there too.
+
+## Share the PDF
+
+"Share" sends the PDF to another app, for example Telegram or ChatGPT. The
+button is on when "Save PDF" is on.
+
+1. The app writes the PDF to `share/` in its cache directory, with the name of
+   the panel. The bytes are the bytes of "Save PDF": the PDF has no time stamp.
+2. The app starts the share sheet of the system (`Intent.createChooser`) with an
+   `ACTION_SEND` intent of the type `application/pdf`. The intent has a content
+   URI of the `FileProvider` in `EXTRA_STREAM` and in its `ClipData`, and
+   `FLAG_GRANT_READ_URI_PERMISSION`. The other app can read this file only.
+3. The other app gets the file name from the `FileProvider`.
+
+When a new scan starts, the app deletes the files in `share/`. It deletes no file
+of another directory. The app has one `FileProvider`, and
+`res/xml/file_paths.xml` has one directory for each use.
 
 ## Settings and memory
 

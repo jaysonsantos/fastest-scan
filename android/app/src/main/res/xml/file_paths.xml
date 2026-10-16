@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The directories that the FileProvider of the app gives to other apps. Each use
+    has a directory of its own, so that the clean-up of one use deletes no file of
+    another use.
+    share/: the PDF of the "Share" button. MainActivity.SHARE_DIRECTORY has the same name. -->
+<paths>
+    <cache-path
+        name="share"
+        path="share/" />
+</paths>

@@ -48,8 +48,8 @@ zig-out/bin/fastest-scan ~/VID_20261009_180010.mp4 -o out/stream.pdf -v --stream
 The Android app in `android/` scans a recorded video on a phone (a REDMI Note 15
 Pro+ 5G) and on the Android emulator. On the phone, the benchmark video of 180 s
 gives the 63 pages in 151 s, with 29 ms for each frame, and the app holds at most
-1.1 GB of native memory. **No real book was scanned with the camera.** Read
-`docs/android.md`.
+1.1 GB of native memory. The camera of the phone scanned a paperback, letters,
+and an invoice: decisions 0029 to 0033 use these scans. Read `docs/android.md`.
 
 Each page comes from its own reference frame: the frame of the spread that shows
 the most ink of that page (decision 0013). Up to 9 other frames repair it, 3 of
@@ -106,7 +106,8 @@ finger is lost: `--fingers blank` and `--fingers keep` change the rule.
 | C interface (`include/fastscan.h`): the stream session | Done. `tests/c_api.c` uses the header only; `zig build test` runs it. |
 | JNI layer (`android/app/src/main/cpp/fastscan_jni.c`) and the Java class `Native` | Done. `scripts/test-jni.sh` runs them on the Java machine of the desktop. |
 | `zig build android`: the library for `arm64-v8a` and `x86_64` | Done. The JNI libraries need `-Dandroid-ndk`; the Android shell of the flake has the NDK. The `x86_64` library runs on the emulator, and the `arm64-v8a` library on a phone. |
-| Android app (`android/`): camera source, video source, one screen, PDF export | Builds. The video source gives the 63 pages of the benchmark on a phone and on the emulator. On the emulator, the PDF export works, and the camera source gives its frames to the library. **No scan of a real book with the camera.** |
+| Android app (`android/`): camera source, video source, one screen, PDF export | Builds. The video source gives the 63 pages of the benchmark on a phone and on the emulator. On the emulator, the PDF export works, and the camera source gives its frames to the library. The camera of the phone scanned a paperback, letters, and an invoice (decisions 0029 to 0033). |
+| Android app: the PDF name with the date and time of the scan, and "Share" to another app (`docs/android.md`) | Done. Unit tests on the Java machine for the name rule (`gradle testDebugUnitTest`). The share works on the emulator. The share to Telegram and ChatGPT is not verified on a phone. |
 | `scripts/test-android.sh`: the tests on a phone or an emulator | Done, run on a phone and on the emulator. Not in CI: the Android SDK has a licence. |
 
 Debug output (`--debug-dir`): `analysis.csv` (one line per frame), `segments.csv`
@@ -212,6 +213,8 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
    from it (`docs/android.md`). What is left, in this order:
    - Scan a real book with the camera of the phone. Check the frame rate that
      CameraX gives, the colours, and the page outline on the preview.
+   - Share a PDF from the phone to Telegram and to ChatGPT. Check that Telegram
+     sends the file with the name of the app.
    - Bring the memory down: 1.1 GB of native memory on the phone is much. Run
      `scripts/test-android.sh` with smaller settings (`ScanOptions`: fewer donor
      frames, one render thread, a smaller page), and compare the pages.
@@ -330,7 +333,8 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
   with a limit of 24 frames, and 0.7 GB with one render thread, a limit of 16
   frames, and worse pages. The app holds 1.1 GB on the phone and 0.8 GB on the
   emulator. Decision 0019 has the tables.
-- **The app has one screen and no settings.** The user cannot change the page
+- **The app has one screen and one setting**: the date and time at the start of
+  the PDF name. The user cannot change the page
   layout, the finger rule, or the quality. The screen is fixed to the upright
   position, and a scan stops when the app goes to the background.
 

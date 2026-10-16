@@ -1,7 +1,9 @@
 package br.com.jayson.fastestscan.ui
 
 import android.Manifest
+import android.content.ClipData
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
@@ -18,6 +20,7 @@ import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -25,14 +28,17 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import br.com.jayson.fastestscan.R
 import br.com.jayson.fastestscan.core.FrameFormat
+import br.com.jayson.fastestscan.core.PdfName
 import br.com.jayson.fastestscan.core.ScanOptions
 import br.com.jayson.fastestscan.core.ScanSession
 import br.com.jayson.fastestscan.core.ScanStatus
 import br.com.jayson.fastestscan.source.CameraSource
 import br.com.jayson.fastestscan.source.VideoFileSource
 import java.io.File
+import java.time.ZonedDateTime
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ExecutorService
@@ -45,7 +51,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * - a recorded video: the decoder runs one time through the file.
  *
  * The two sources give their frames to a [ScanSession]. The screen shows what the
- * library finds, and writes the PDF when the scan has ended.
+ * library finds. When the scan has ended, the user saves the PDF, or shares it with
+ * another app. [PdfName] gives the file name.
  *
  * The screen turns with the phone, and the camera frames turn with the screen. The
  * activity is not made new for a turn: it puts its views in the other direction
@@ -64,7 +71,12 @@ class MainActivity : ComponentActivity() {
     private lateinit var cameraButton: Button
     private lateinit var videoButton: Button
     private lateinit var saveButton: Button
+    private lateinit var shareButton: Button
     private lateinit var videoCheck: CheckBox
+    private lateinit var nameGroup: View
+    private lateinit var nameField: EditText
+    private lateinit var prefixCheck: CheckBox
+    private lateinit var preferences: SharedPreferences
 
     private var camera: CameraSource? = null
 
@@ -76,9 +88,13 @@ class MainActivity : ComponentActivity() {
 
     /** The scan with the pages for the PDF. Only the main thread changes it. */
     private var session: ScanSession? = null
+
+    /** The local date and time when the user started the last scan: the prefix of the PDF name. */
+    private var scanStart: ZonedDateTime = ZonedDateTime.now()
+
     private var state = State.IDLE
 
-    /** One thread for the slow steps that are not a render: the decoder, the end of a scan, the PDF file. */
+    /** One thread for the slow steps that are not a render: the decoder, the end of a scan, the PDF files. */
     private val background: ExecutorService = Executors.newSingleThreadExecutor()
     private val cancelled = AtomicBoolean(false)
 
@@ -118,7 +134,12 @@ class MainActivity : ComponentActivity() {
         cameraButton = findViewById(R.id.camera_button)
         videoButton = findViewById(R.id.video_button)
         saveButton = findViewById(R.id.save_button)
+        shareButton = findViewById(R.id.share_button)
         videoCheck = findViewById(R.id.video_check)
+        nameGroup = findViewById(R.id.name_group)
+        nameField = findViewById(R.id.name_field)
+        prefixCheck = findViewById(R.id.prefix_check)
+        preferences = getSharedPreferences(PREFERENCES_NAME, MODE_PRIVATE)
         // The whole frame is in view, at the start of its part of the screen: the
         // free end of that part is next to the panel.
         previewView.scaleType = PreviewView.ScaleType.FIT_START
@@ -126,8 +147,11 @@ class MainActivity : ComponentActivity() {
 
         cameraButton.setOnClickListener { if (state == State.CAMERA_SCAN) stopCameraScan() else startCameraScan() }
         videoButton.setOnClickListener { if (state == State.VIDEO_SCAN) cancelled.set(true) else pickVideo.launch(VIDEO_MIME_TYPE) }
-        saveButton.setOnClickListener { createPdf.launch(getString(R.string.default_file_name)) }
+        saveButton.setOnClickListener { createPdf.launch(pdfFileName()) }
+        shareButton.setOnClickListener { sharePdf() }
         videoCheck.setOnClickListener { setVideoStream(videoCheck.isChecked) }
+        prefixCheck.isChecked = preferences.getBoolean(PREFERENCE_NAME_PREFIX, DEFAULT_NAME_PREFIX)
+        prefixCheck.setOnClickListener { preferences.edit().putBoolean(PREFERENCE_NAME_PREFIX, prefixCheck.isChecked).apply() }
         showState(State.IDLE)
 
         // Another app opened a video with this app: scan it. The camera stays off.
@@ -181,7 +205,7 @@ class MainActivity : ComponentActivity() {
 
     private fun startCameraScan() {
         val source = camera ?: return
-        dropOldSession()
+        startNewScan()
         videoNote = null
         showState(State.CAMERA_SCAN)
         source.startScan(
@@ -233,7 +257,7 @@ class MainActivity : ComponentActivity() {
     // region: a recorded video as the source
 
     private fun scanVideo(uri: Uri) {
-        dropOldSession()
+        startNewScan()
         cancelled.set(false)
         showState(State.VIDEO_SCAN)
         background.execute {
@@ -275,17 +299,26 @@ class MainActivity : ComponentActivity() {
                 val pages = finished?.pageCount ?: 0
                 statusText.text = resources.getQuantityString(R.plurals.status_done, pages, pages)
                 videoNote?.let { statusText.append(" $it") }
-                saveButton.isEnabled = pages > 0
+                showPdfControls(pages > 0)
             }
         } catch (error: Throwable) {
             scanFailed(error)
         }
     }
 
+    /** The user starts a scan. The pages, the name, and the shared files of the last scan go. */
+    private fun startNewScan() {
+        dropOldSession()
+        scanStart = ZonedDateTime.now()
+        nameField.setText(R.string.default_pdf_name)
+        // The background thread runs its tasks in order: no share of the new scan starts before this.
+        background.execute(::deleteSharedFiles)
+    }
+
     private fun dropOldSession() {
         val old = session ?: return
         session = null
-        saveButton.isEnabled = false
+        showPdfControls(false)
         lastPageView.setImageDrawable(null)
         background.execute { old.close() }
     }
@@ -343,7 +376,7 @@ class MainActivity : ComponentActivity() {
         // A session has the rotation of its first frame: no turn during a scan with the camera.
         requestedOrientation = if (next == State.CAMERA_SCAN) ActivityInfo.SCREEN_ORIENTATION_LOCKED else ActivityInfo.SCREEN_ORIENTATION_FULL_USER
         updateButtons()
-        if (next != State.IDLE) saveButton.isEnabled = false
+        if (next != State.IDLE) showPdfControls(false)
         if (next != State.CAMERA_SCAN) overlay.clear()
         when (next) {
             State.IDLE -> statusText.setText(R.string.status_idle)
@@ -385,6 +418,21 @@ class MainActivity : ComponentActivity() {
         videoButton.setText(if (state == State.VIDEO_SCAN) R.string.button_cancel else R.string.button_video)
     }
 
+    /** The name field, its check box, and the two buttons for the PDF: for a scan with pages only. */
+    private fun showPdfControls(enabled: Boolean) {
+        saveButton.isEnabled = enabled
+        shareButton.isEnabled = enabled
+        nameGroup.visibility = if (enabled) View.VISIBLE else View.GONE
+    }
+
+    // endregion: the screen
+
+    // region: the PDF
+
+    /** The file name of the PDF, from the start of the scan, the name field, and the check box. */
+    private fun pdfFileName(): String =
+        PdfName.fileName(scanStart, nameField.text.toString(), prefixCheck.isChecked, getString(R.string.default_pdf_name))
+
     private fun writePdf(uri: Uri) {
         val current = session ?: return
         background.execute {
@@ -397,11 +445,71 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // endregion: the screen
+    /**
+     * Write the PDF to the share directory, with the name of [pdfFileName], and let
+     * the user choose an app for it. The bytes are the bytes of "Save PDF".
+     */
+    private fun sharePdf() {
+        val current = session ?: return
+        val name = pdfFileName()
+        background.execute {
+            try {
+                val directory = File(cacheDir, SHARE_DIRECTORY)
+                directory.mkdirs()
+                val file = File(directory, name)
+                file.outputStream().buffered().use(current::writePdf)
+                runOnUiThread { startShare(file) }
+            } catch (error: Throwable) {
+                scanFailed(error)
+            }
+        }
+    }
+
+    /**
+     * Give the file to the share sheet of the system. The other app gets a content URI
+     * and a read permission for it only. The URI is in [Intent.EXTRA_STREAM] and in the
+     * clip data: the share sheet shows the clip, and the permission covers the clip.
+     */
+    private fun startShare(file: File) {
+        val uri = FileProvider.getUriForFile(this, packageName + FILE_PROVIDER_SUFFIX, file)
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = PDF_MIME_TYPE
+            putExtra(Intent.EXTRA_STREAM, uri)
+            clipData = ClipData.newUri(contentResolver, file.name, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        startActivity(Intent.createChooser(send, getString(R.string.share_title)))
+    }
+
+    /**
+     * Delete the files of the last shares: only the files in the share directory, in
+     * no other directory. Runs on the background thread.
+     */
+    private fun deleteSharedFiles() {
+        val files = File(cacheDir, SHARE_DIRECTORY).listFiles() ?: return
+        for (file in files) {
+            if (file.isFile && !file.delete()) Log.w(LOG_TAG, "cannot delete the shared file ${file.name}")
+        }
+    }
+
+    // endregion: the PDF
 
     private companion object {
         const val LOG_TAG = "fastscan"
         const val PDF_MIME_TYPE = "application/pdf"
+
+        /** The directory of the shared PDF files, in the cache directory. res/xml/file_paths.xml has the same path. */
+        const val SHARE_DIRECTORY = "share"
+
+        /** The authority of the FileProvider is the package name and this suffix, as in the manifest. */
+        const val FILE_PROVIDER_SUFFIX = ".fileprovider"
+
+        /** The settings of the user. */
+        const val PREFERENCES_NAME = "settings"
+
+        /** True: the name of the PDF starts with the date and the time of the scan. */
+        const val PREFERENCE_NAME_PREFIX = "pdf_name_date_prefix"
+        const val DEFAULT_NAME_PREFIX = true
 
         /** The name of the video file of a scan, with the date and the time of its start. */
         const val VIDEO_FILE_NAME = "scan-%1\$tY%1\$tm%1\$td-%1\$tH%1\$tM%1\$tS.mp4"
