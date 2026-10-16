@@ -236,8 +236,9 @@ pub fn run(io: Io, gpa: Allocator, config: *const args.Config, info: *const ffmp
             @divTrunc(push_nanoseconds, nanoseconds_per_millisecond),
             @as(f64, @floatFromInt(push_nanoseconds)) / nanoseconds_per_millisecond / @as(f64, @floatFromInt(@max(frames_read, 1))),
         });
-        std.debug.print("timeline: {d} spreads ({d} duplicates removed, {d} with no usable picture), {d} pages of {d}x{d}\n", .{
+        std.debug.print("timeline: {d} spreads ({d} runs kept apart from a similar spread, {d} duplicates removed, {d} with no usable picture), {d} pages of {d}x{d}\n", .{
             stats.segments,
+            stats.runs_kept_apart,
             stats.duplicate_spreads,
             stats.unusable_spreads,
             session.pageCount(),

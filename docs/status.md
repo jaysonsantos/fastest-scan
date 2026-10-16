@@ -101,7 +101,7 @@ finger is lost: `--fingers blank` and `--fingers keep` change the rule.
 | `curl.zig`: a page map for a curled page, after He et al. 2013 | Done, tested on synthetic pages. Off by default (`--curl`): it lowers the quality on the benchmark. See decision 0012. |
 | `timeline.Tracker`, `dedup.Resolver`: the timeline and the duplicate search for frames and spreads that come one by one | Done, tested. `timeline.build` and `dedup.resolve` are loops over them: the PDF of the two passes has the same bytes as before. |
 | `intake.zig`: a frame of a phone (row strides, U and V in turn, on its side) as a frame of the library; the small frame for the analysis | Done, tested |
-| `stream.zig`: the stream session: frames in order, a few frames in memory, a job for each spread | Works on the benchmark: 63 pages. Tested with synthetic videos. No frames from the time before a spread: decision 0019. |
+| `stream.zig`: the stream session: frames in order, a few frames in memory, a job for each spread | Works on the benchmark: 63 pages. Tested with synthetic videos. No frames from the time before a spread: decision 0019. Two runs join only when the duplicate search on their small pictures finds the same pages (decision 0032). |
 | CLI `--stream`: the stream session on a desktop, one pass with no frame cache | Done |
 | C interface (`include/fastscan.h`): the stream session | Done. `tests/c_api.c` uses the header only; `zig build test` runs it. |
 | JNI layer (`android/app/src/main/cpp/fastscan_jni.c`) and the Java class `Native` | Done. `scripts/test-jni.sh` runs them on the Java machine of the desktop. |
@@ -130,7 +130,9 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
    to 95 % of the textured tiles of a page; two different spreads match on at most
    23 %. The limits are 50 % for the better page and 35 % for the other page.
    Two pages of one form can match more: decision 0031 adds the test for print
-   on blank paper.
+   on blank paper. In the stream mode, the same test decides the join of two
+   runs with similar thumbnails (decision 0032). Next: the same check in the two
+   passes.
 3. **M2, glare, and M3, fingers and cut pages.** Done in a first form: see "What
    exists" and "Known problems".
 4. **Quality of the fusion.** Done in a second form (decision 0013): a reference
@@ -248,6 +250,22 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
   large letters gives 46 % for two views of it, so the camera scan has 11 pages
   in two passes, where 10 are correct (decision 0029, "Limits"). The stream
   mode gives 10.
+- **Two passes: the timeline joins two different pages with similar
+  thumbnails.** After a short break, the timeline joins two runs when the
+  thumbnails of their best frames have a similarity of 0.9 or more. Two pages
+  of an invoice have 0.92, and two spreads of a book with little print have up
+  to 0.97. Then a page is missing. The stream mode compares the small pictures
+  of the two runs before the join (decision 0032); the two passes do not. A
+  book video of 2026-10-12 gives 7 pages in two passes, and 3 spreads are
+  missing. The video of an invoice at 24 frames in a second gives 2 pages of 3.
+- **A view with a hand that bends a page does not match a good view of it.**
+  The outline of the bent page is wrong, so its small picture does not
+  register. In the stream mode, the book video of 2026-10-12 has one spread two
+  times (decision 0032, "Limits").
+- **A page that comes again after more than four spreads stays two times.** The
+  duplicate search compares a weak spread with the four kept spreads before it
+  only. The book video of 2026-10-12 shows the front cover at the start and at
+  the end, and the stream mode keeps both.
 - **A coloured page on a dark desk is not in the result.** Only the line
   search finds a page that is not white paper, and it runs only when the
   surface around the book is bright (decision 0028). On a dark desk the white

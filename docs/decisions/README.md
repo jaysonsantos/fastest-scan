@@ -37,3 +37,4 @@ replaces it and name the old file in the new one.
 | [0029](0029-a-line-is-the-edge-that-it-came-from.md) | A line of the line search is the edge that it came from |
 | [0030](0030-open-book-with-no-white-page.md) | An open book with no page of white paper |
 | [0031](0031-print-on-blank-paper.md) | Print on blank paper makes two pages different |
+| [0032](0032-check-a-join-of-two-runs.md) | The small pictures decide the join of two runs in the stream session |

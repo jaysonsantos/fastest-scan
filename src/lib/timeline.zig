@@ -33,7 +33,8 @@ pub const Options = struct {
     min_reference_support: f32 = 0.12,
     /// Two runs next to each other show the same spread when their best frames are
     /// at least this similar. The value is high: a page that appears two times in the
-    /// PDF is a smaller fault than a page that is missing.
+    /// PDF is a smaller fault than a page that is missing. The judge of the tracker
+    /// can still keep the two runs apart.
     merge_similarity: f32 = 0.9,
     /// A spread with a shorter stable time than this is weak.
     weak_run_seconds: f32 = 0.6,
@@ -156,10 +157,10 @@ pub fn build(allocator: Allocator, observations: []const FrameObservation, optio
     var tracker: Tracker = .init(options);
     const window: Window = .{ .items = observations };
     for (0..observations.len) |index| {
-        const step = tracker.push(window, index);
+        const step = try tracker.push(window, index, Tracker.by_thumbnails);
         if (step.final) |segment| try segments.append(allocator, segment);
     }
-    for (tracker.finish(window).final) |final| {
+    for ((try tracker.finish(window, Tracker.by_thumbnails)).final) |final| {
         if (final) |segment| try segments.append(allocator, segment);
     }
     return .{ .segments = try segments.toOwnedSlice(allocator) };
@@ -172,6 +173,12 @@ pub fn build(allocator: Allocator, observations: []const FrameObservation, optio
 /// A spread is final only when the next spread is known: a run of stable frames
 /// after a short break can show the same spread again, and then it joins the
 /// spread before it.
+///
+/// The thumbnails of two different pages of one form can be as similar as two
+/// views of one page. So a judge of the caller decides each join: a value with a
+/// function `sameSpread(judge, previous: Segment, run: Segment) !bool`. `previous`
+/// is `pending`, and `run` is the run that ended, as a spread. The judge looks only:
+/// it does not change the tracker. See `docs/decisions/0032-check-a-join-of-two-runs.md`.
 pub const Tracker = struct {
     options: Options,
     /// The run of stable frames that the last frame belongs to.
@@ -207,13 +214,23 @@ pub const Tracker = struct {
         opened: bool = false,
     };
 
+    /// The judge of `build`: two runs with similar thumbnails show one spread.
+    pub const by_thumbnails: ThumbnailJudge = .{};
+
+    pub const ThumbnailJudge = struct {
+        pub fn sameSpread(_: ThumbnailJudge, _: Segment, _: Segment) error{}!bool {
+            return true;
+        }
+    };
+
     pub fn init(options: Options) Tracker {
         return .{ .options = options };
     }
 
     /// Take the frame `index`. The window holds the observations up to this frame.
-    /// The frames come in order, with no index left out.
-    pub fn push(self: *Tracker, window: Window, index: usize) Step {
+    /// The frames come in order, with no index left out. An error comes only from
+    /// `judge`, and the tracker then has no change.
+    pub fn push(self: *Tracker, window: Window, index: usize, judge: anytype) !Step {
         const options = self.options;
         const rate_factor = Options.reference_frame_rate / @max(options.frames_per_second, 1);
         const max_motion = options.max_motion * rate_factor;
@@ -242,7 +259,7 @@ pub const Tracker = struct {
                     self.gap = 0;
                     return step;
                 }
-                self.close(window, run.*, &step);
+                try self.close(window, run.*, &step, judge);
             }
             self.current = .{ .first = index - 1, .last = index, .stable = 2, .kind = frame.kind };
             self.gap = 0;
@@ -250,7 +267,7 @@ pub const Tracker = struct {
         } else if (self.current) |run| {
             self.gap += 1;
             if (@as(f32, @floatFromInt(self.gap)) > max_gap_frames) {
-                self.close(window, run, &step);
+                try self.close(window, run, &step, judge);
                 self.current = null;
                 self.gap = 0;
             }
@@ -266,10 +283,11 @@ pub const Tracker = struct {
         final: [2]?Segment = @splat(null),
     };
 
-    /// The video has no more frames.
-    pub fn finish(self: *Tracker, window: Window) End {
+    /// The video has no more frames. An error comes only from `judge`, and the
+    /// tracker then has no change.
+    pub fn finish(self: *Tracker, window: Window, judge: anytype) !End {
         var step: Step = .{};
-        if (self.current) |run| self.close(window, run, &step);
+        if (self.current) |run| try self.close(window, run, &step, judge);
         self.current = null;
         self.gap = 0;
         const last = self.pending;
@@ -283,8 +301,8 @@ pub const Tracker = struct {
     }
 
     /// Decide what a run that ended is: no spread, the spread of `pending` again,
-    /// or a new spread.
-    fn close(self: *Tracker, window: Window, run: Run, step: *Step) void {
+    /// or a new spread. The tracker changes only after the judge.
+    fn close(self: *Tracker, window: Window, run: Run, step: *Step, judge: anytype) !void {
         const options = self.options;
         const weak_run: usize = @intFromFloat(@round(options.weak_run_seconds * options.frames_per_second));
         const observations = window.items;
@@ -309,7 +327,8 @@ pub const Tracker = struct {
         // The same spread after a short break: join it with the run before.
         if (self.pending) |*previous| {
             const similarity = observe.frameSimilarity(window.at(previous.reference), best);
-            if (previous.kind == segment.kind and similarity != null and similarity.? >= options.merge_similarity) {
+            const similar = similarity != null and similarity.? >= options.merge_similarity;
+            if (previous.kind == segment.kind and similar and try judge.sameSpread(previous.*, segment)) {
                 previous.last_frame = segment.last_frame;
                 previous.stable_frames += segment.stable_frames;
                 if (segment.score > previous.score) {
@@ -1203,7 +1222,7 @@ test "the tracker gives the spreads of `build`, each one after the next spread i
     var base: usize = 0;
     for (0..observations.len) |index| {
         const window: Window = .{ .items = observations[base .. index + 1], .base = base };
-        const step = tracker.push(window, index);
+        const step = try tracker.push(window, index, Tracker.by_thumbnails);
         if (step.closed) |closed| {
             fates[fate_count] = closed.fate;
             fate_count += 1;
@@ -1216,7 +1235,7 @@ test "the tracker gives the spreads of `build`, each one after the next spread i
             base = tracker.pending.?.first_frame - 1;
         }
     }
-    const end = tracker.finish(.{ .items = observations[base..], .base = base });
+    const end = try tracker.finish(.{ .items = observations[base..], .base = base }, Tracker.by_thumbnails);
     fates[fate_count] = end.closed.?.fate;
     fate_count += 1;
     for (end.final) |final| {
@@ -1227,6 +1246,53 @@ test "the tracker gives the spreads of `build`, each one after the next spread i
     }
     try testing.expectEqualSlices(Segment, timeline.segments, found[0..found_count]);
     try testing.expectEqualSlices(Tracker.Fate, &.{ .accepted, .accepted, .merged, .accepted }, fates[0..fate_count]);
+}
+
+test "the judge of the tracker keeps two similar runs apart" {
+    var observations: [110]FrameObservation = undefined;
+    for (0..30) |index| observations[index] = testObservation(1, .spread, 0, 0.5);
+    for (30..40) |index| observations[index] = FrameObservation.none;
+    // Two runs with the same thumbnails after a break of half a second.
+    for (40..70) |index| observations[index] = testObservation(2, .spread, 0, 0.5);
+    for (70..85) |index| observations[index] = FrameObservation.none;
+    for (85..110) |index| observations[index] = testObservation(2, .spread, 4, 0.6);
+
+    const Judge = struct {
+        asked: usize = 0,
+        previous_last_frame: u32 = 0,
+        run_first_frame: u32 = 0,
+
+        pub fn sameSpread(self: *@This(), previous: Segment, run: Segment) error{}!bool {
+            self.asked += 1;
+            self.previous_last_frame = previous.last_frame;
+            self.run_first_frame = run.first_frame;
+            return false;
+        }
+    };
+    var judge: Judge = .{};
+    var tracker: Tracker = .init(test_options);
+    const window: Window = .{ .items = &observations };
+    var segments: [3]Segment = undefined;
+    var count: usize = 0;
+    for (0..observations.len) |index| {
+        const step = try tracker.push(window, index, &judge);
+        if (step.final) |segment| {
+            segments[count] = segment;
+            count += 1;
+        }
+    }
+    for ((try tracker.finish(window, &judge)).final) |final| {
+        if (final) |segment| {
+            segments[count] = segment;
+            count += 1;
+        }
+    }
+    // The judge decides only the join of the two similar runs.
+    try testing.expectEqual(@as(usize, 1), judge.asked);
+    try testing.expectEqual(@as(usize, 3), count);
+    try testing.expectEqual(segments[1].last_frame, judge.previous_last_frame);
+    try testing.expectEqual(segments[2].first_frame, judge.run_first_frame);
+    try testing.expect(segments[1].last_frame < 70 and segments[2].first_frame >= 85);
 }
 
 test "only the frames that the caller still holds are a reference or a donor" {

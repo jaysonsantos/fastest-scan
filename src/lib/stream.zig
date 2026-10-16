@@ -10,6 +10,8 @@
 //!
 //! 1. The analysis: a small copy of the frame, and the observation of that copy.
 //! 2. The timeline: `timeline.Tracker` says when a spread starts, ends, and is final.
+//!    Before it joins two runs of stable frames to one spread, the session compares
+//!    the small pictures of the two runs (decision 0032).
 //! 3. The frames of a spread: while a spread is in view, the session makes the choice
 //!    of `timeline.chooseReference` and `timeline.selectDonors` again and again,
 //!    among the frames that it still holds, and drops the frames that the choice
@@ -158,6 +160,9 @@ pub const Stats = struct {
     /// The number of times a choice of frames had fewer places for donor frames
     /// than the options give, because of `max_held_frames`.
     donor_limits: u32 = 0,
+    /// Runs of stable frames with the thumbnails of the spread before them that
+    /// stayed a spread of their own: their small pictures show different pages.
+    runs_kept_apart: u32 = 0,
 };
 
 /// What the render did on one page.
@@ -246,6 +251,14 @@ const Gather = struct {
             if (frame.index == index) return frame;
         }
         return null;
+    }
+
+    /// The frame `reference` when the gather holds it, or else the first choice of
+    /// the last choice of frames.
+    fn picture(self: *const Gather, reference: u32) ?*HeldFrame {
+        if (self.find(reference)) |frame| return frame;
+        const choice = self.choice orelse return null;
+        return self.find(choice.fallback);
     }
 
     fn take(self: *Gather, index: u32) ?HeldFrame {
@@ -390,6 +403,25 @@ pub const Job = struct {
     }
 };
 
+/// A spread for the duplicate search. The candidate reads the pictures of
+/// `signature`, which must have a picture of each page of the spread.
+fn candidateOf(segment: timeline.Segment, signature: *const render.SpreadSignature) dedup.Candidate {
+    var candidate: dedup.Candidate = .{
+        .kind = segment.kind,
+        .signatures = undefined,
+        .quality = segment.score -
+            outside_quality_weight * signature.outside_fraction -
+            clipped_quality_weight * @as(f32, @floatFromInt(signature.clipped_edge_count)),
+        .weak = segment.weak,
+    };
+    for (&candidate.signatures, &candidate.hidden, 0..) |*plane, *hidden, page_index| {
+        const source = if (page_index < signature.page_count) page_index else 0;
+        plane.* = signature.pages[source].view();
+        hidden.* = signature.hidden[source].view();
+    }
+    return candidate;
+}
+
 // endregion: spreads and jobs
 
 // region: stream
@@ -529,7 +561,7 @@ pub const Stream = struct {
         if (observation.detected) self.stats.detected_frames += 1;
         self.noteTime(seconds);
 
-        const step = self.tracker.push(self.window(), index);
+        const step = try self.tracker.push(self.window(), index, JoinJudge{ .stream = self, .scratch = scratch });
         if (step.closed) |closed| try self.runClosed(scratch, closed, step.final, self.tracker.pending);
         if (step.opened) try self.openRun(index);
 
@@ -562,7 +594,7 @@ pub const Stream = struct {
     pub fn finish(self: *Stream, scratch: Allocator) Error!void {
         if (self.ended) return;
         self.ended = true;
-        const end = self.tracker.finish(self.window());
+        const end = try self.tracker.finish(self.window(), JoinJudge{ .stream = self, .scratch = scratch });
         if (end.closed) |closed| try self.runClosed(scratch, closed, end.final[0], end.final[1]);
         // A run that the tracker did not close has no stable frames to give.
         if (self.current) |*gather| self.freeGather(gather);
@@ -820,6 +852,48 @@ pub const Stream = struct {
             gather.fresh += 1;
         }
         self.current = gather;
+    }
+
+    /// The judge of the timeline for the join of two runs of stable frames.
+    const JoinJudge = struct {
+        stream: *Stream,
+        scratch: Allocator,
+
+        pub fn sameSpread(self: JoinJudge, previous: timeline.Segment, run: timeline.Segment) Allocator.Error!bool {
+            return self.stream.runsShowOneSpread(self.scratch, previous, run);
+        }
+    };
+
+    /// True when the run that ended shows the spread of `pending` again. The
+    /// thumbnails of the two runs are similar; the duplicate search on the small
+    /// pictures of the pages decides. With no small picture of each run, the
+    /// thumbnails decide.
+    fn runsShowOneSpread(self: *Stream, scratch: Allocator, previous: timeline.Segment, run: timeline.Segment) Allocator.Error!bool {
+        const earlier = if (self.pending) |*gather| gather.picture(previous.reference) else null;
+        const later = if (self.current) |*gather| gather.picture(run.reference) else null;
+        if (earlier == null or later == null) return true;
+        const page_size = if (self.page_geometry) |found| found.size else size: {
+            // The page size is not final yet: the size from the two runs.
+            const observations = [2]FrameObservation{
+                self.observations.items[previous.reference - self.base],
+                self.observations.items[run.reference - self.base],
+            };
+            var segments = [2]timeline.Segment{ previous, run };
+            segments[0].reference = 0;
+            segments[1].reference = 1;
+            const scale: f32 = @floatFromInt(self.factor);
+            const found = try document.pageGeometry(scratch, &observations, &segments, self.analysis_size, scale, self.options.geometry);
+            break :size (found orelse return true).size;
+        };
+        const kind = previous.kind;
+        const first = try self.signatureOf(scratch, scratch, earlier.?, kind, page_size);
+        defer first.deinit(scratch);
+        const second = try self.signatureOf(scratch, scratch, later.?, kind, page_size);
+        defer second.deinit(scratch);
+        if (first.page_count != kind.pageCount() or second.page_count != kind.pageCount()) return true;
+        const comparison = try dedup.compare(scratch, &candidateOf(previous, &first), &candidateOf(run, &second), self.options.dedup);
+        if (!comparison.same) self.stats.runs_kept_apart += 1;
+        return comparison.same;
     }
 
     /// A run of stable frames ended. `final` is the spread that can change no more,
@@ -1108,32 +1182,7 @@ pub const Stream = struct {
         };
 
         // A small picture of each page, from the first choice of the timeline.
-        const signature = signature: {
-            var upright: ?[]u8 = null;
-            defer if (upright) |buffer| scratch.free(buffer);
-            var data: []const u8 = first_choice.data;
-            const source_size = self.options.source_size;
-            if (self.options.rotation != .none) {
-                const buffer = try scratch.alloc(u8, image.packedFrameSize(self.upright_size.width, self.upright_size.height));
-                upright = buffer;
-                const as_given = image.FrameView.fromPacked(first_choice.data, source_size.width, source_size.height, self.options.colorimetry);
-                intake.rotate(buffer, as_given, self.options.rotation);
-                data = buffer;
-            }
-            break :signature try render.renderSignature(
-                gpa,
-                scratch,
-                .{
-                    .frame = image.FrameView.fromPacked(data, self.upright_size.width, self.upright_size.height, self.options.colorimetry),
-                    .quads = first_choice.quads,
-                    .clipped_edges = first_choice.clipped_edges,
-                    .colored = first_choice.colored,
-                },
-                spread.segment.kind,
-                page_size,
-                self.options.render,
-            );
-        };
+        const signature = try self.signatureOf(gpa, scratch, first_choice, spread.segment.kind, page_size);
         if (signature.page_count != spread.segment.kind.pageCount()) {
             signature.deinit(gpa);
             self.stats.unusable_spreads += 1;
@@ -1142,20 +1191,7 @@ pub const Stream = struct {
         }
         spread.signature = signature;
 
-        var candidate: dedup.Candidate = .{
-            .kind = spread.segment.kind,
-            .signatures = undefined,
-            .quality = spread.segment.score -
-                outside_quality_weight * signature.outside_fraction -
-                clipped_quality_weight * @as(f32, @floatFromInt(signature.clipped_edge_count)),
-            .weak = spread.segment.weak,
-        };
-        for (&candidate.signatures, &candidate.hidden, 0..) |*plane, *hidden, page_index| {
-            const source = if (page_index < signature.page_count) page_index else 0;
-            plane.* = signature.pages[source].view();
-            hidden.* = signature.hidden[source].view();
-        }
-        const decision = try self.resolver.add(gpa, id, candidate, null);
+        const decision = try self.resolver.add(gpa, id, candidateOf(spread.segment, &spread.signature.?), null);
         switch (decision) {
             .kept => {},
             .duplicate => {
@@ -1177,6 +1213,41 @@ pub const Stream = struct {
         const stored = &self.spreads.items[id];
         stored.job = job;
         stored.state = .queued;
+    }
+
+    /// The small picture of each page of a frame in hand, for the duplicate search.
+    fn signatureOf(
+        self: *const Stream,
+        allocator: Allocator,
+        scratch: Allocator,
+        frame: *const HeldFrame,
+        kind: detect.LayoutKind,
+        page_size: image.Size,
+    ) Allocator.Error!render.SpreadSignature {
+        var upright: ?[]u8 = null;
+        defer if (upright) |buffer| scratch.free(buffer);
+        var data: []const u8 = frame.data;
+        const source_size = self.options.source_size;
+        if (self.options.rotation != .none) {
+            const buffer = try scratch.alloc(u8, image.packedFrameSize(self.upright_size.width, self.upright_size.height));
+            upright = buffer;
+            const as_given = image.FrameView.fromPacked(frame.data, source_size.width, source_size.height, self.options.colorimetry);
+            intake.rotate(buffer, as_given, self.options.rotation);
+            data = buffer;
+        }
+        return render.renderSignature(
+            allocator,
+            scratch,
+            .{
+                .frame = image.FrameView.fromPacked(data, self.upright_size.width, self.upright_size.height, self.options.colorimetry),
+                .quads = frame.quads,
+                .clipped_edges = frame.clipped_edges,
+                .colored = frame.colored,
+            },
+            kind,
+            page_size,
+            self.options.render,
+        );
     }
 
     /// A better copy took the place of a spread: its pages leave the document.
@@ -1539,8 +1610,23 @@ test "a view after a short break joins the spread before it" {
     try video.show(1, 12, 0);
     try video.stream.finish(testing.allocator);
     _ = try video.runJobs();
+    try testing.expectEqual(@as(u32, 0), video.stream.stats.runs_kept_apart);
     try testing.expectEqual(@as(u32, 1), video.stream.stats.segments);
     try testing.expectEqual(@as(usize, 1), video.stream.pageCount());
+}
+
+test "a page with the thumbnail of the page before it stays a page of its own" {
+    var video = try TestVideo.init(test_options);
+    defer video.deinit();
+    // The seeds 1 and 6 give the bar at the same place and other dots.
+    try video.show(1, 12, 0);
+    try video.turn(8);
+    try video.show(6, 12, 0);
+    try video.stream.finish(testing.allocator);
+    _ = try video.runJobs();
+    try testing.expectEqual(@as(u32, 1), video.stream.stats.runs_kept_apart);
+    try testing.expectEqual(@as(u32, 2), video.stream.stats.segments);
+    try testing.expectEqual(@as(usize, 2), video.stream.pageCount());
 }
 
 test "a page that comes again later stays one time" {
