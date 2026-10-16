@@ -107,7 +107,7 @@ finger is lost: `--fingers blank` and `--fingers keep` change the rule.
 | JNI layer (`android/app/src/main/cpp/fastscan_jni.c`) and the Java class `Native` | Done. `scripts/test-jni.sh` runs them on the Java machine of the desktop. |
 | `zig build android`: the library for `arm64-v8a` and `x86_64` | Done. The JNI libraries need `-Dandroid-ndk`; the Android shell of the flake has the NDK. The `x86_64` library runs on the emulator, and the `arm64-v8a` library on a phone. |
 | Android app (`android/`): camera source, video source, one screen, PDF export | Builds. The video source gives the 63 pages of the benchmark on a phone and on the emulator. On the emulator, the PDF export works, and the camera source gives its frames to the library. The camera of the phone scanned a paperback, letters, and an invoice (decisions 0029 to 0033). |
-| Android app: the PDF name with the date and time of the scan, and "Share" to another app (`docs/android.md`) | Done. Unit tests on the Java machine for the name rule (`gradle testDebugUnitTest`). The share works on the emulator. The share to Telegram and ChatGPT is not verified on a phone. |
+| Android app: the PDF name with the date and time of the scan, and "Share" to another app (`docs/android.md`) | Done. Unit tests on the Java machine for the name rule (`gradle testDebugUnitTest`). The share works on the emulator, and on the phone to Telegram and to ChatGPT (2026-10-16). |
 | `scripts/test-android.sh`: the tests on a phone or an emulator | Done, run on a phone and on the emulator. Not in CI: the Android SDK has a licence. |
 
 Debug output (`--debug-dir`): `analysis.csv` (one line per frame), `segments.csv`
@@ -213,8 +213,6 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
    from it (`docs/android.md`). What is left, in this order:
    - Scan a real book with the camera of the phone. Check the frame rate that
      CameraX gives, the colours, and the page outline on the preview.
-   - Share a PDF from the phone to Telegram and to ChatGPT. Check that Telegram
-     sends the file with the name of the app.
    - Bring the memory down: 1.1 GB of native memory on the phone is much. Run
      `scripts/test-android.sh` with smaller settings (`ScanOptions`: fewer donor
      frames, one render thread, a smaller page), and compare the pages.
@@ -227,6 +225,11 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
 
 ## Known problems
 
+- **A sheet that was folded.** The outline of a page has four straight edges.
+  When a part of a folded sheet tilts up, its edge is not on the straight line,
+  and a wedge of the surface stays in the page. A camera scan of a letter that
+  was folded in three, on a wooden table, has such a wedge at its left edge: 3 %
+  of the page width at the top, and none below the middle of the page.
 - **A bright surface around the book, and a page that runs out of the frame.**
   The outline search of decision 0024 and the line search of decision 0026 find
   a book on a bright surface only when the whole book is inside the frame. When
