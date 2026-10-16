@@ -330,6 +330,9 @@ pub fn renderSignature(
         // No sharpening: the registration compares the structure, not fine edges.
         var enhance_options = options.enhance;
         enhance_options.sharpen_amount = 0;
+        // The limits of the duplicate search come from small pictures without the
+        // shadow rule (decision 0033).
+        enhance_options.accept_shadows = false;
         const finger_grid = finger.Grid.init(warped, options.fuse.cell);
         var fingers: ?finger.Mask = null;
         defer if (fingers) |mask| mask.deinit(scratch);

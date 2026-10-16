@@ -1,6 +1,6 @@
 # Status
 
-Last change: 2026-10-12.
+Last change: 2026-10-16.
 
 This page is the entry point to resume the work. Change it in each commit that
 changes the state.
@@ -86,7 +86,7 @@ finger is lost: `--fingers blank` and `--fingers keep` change the rule.
 | `timeline.zig`: stable runs of frames, one reference frame per spread | Works, but splits some spreads in two |
 | `document.zig`: one page size for all pages | Done, tested |
 | `resample.zig`: bicubic sampling, page warp | Done, tested |
-| `enhance.zig`: paper colour surface, division, unsharp mask, levels | Done, tested |
+| `enhance.zig`: paper colour surface, division, unsharp mask, levels | Done, tested. A shadow that the surface cannot follow keeps its own paper colour, so the division takes away the shadow and its colour (decision 0033). |
 | `render.zig`: detect at full size, warp, enhance, JPEG | Done, tested |
 | CLI: arguments, `ffprobe`, parallel `ffmpeg` readers, analysis pass, render pass, PDF, frame cache, debug pictures | Done |
 | `register.zig`: tile alignment on a pyramid, robust plane transform | Done, tested |
@@ -285,6 +285,12 @@ the donors, and the fault areas), `duplicates.csv`. With `--debug-layers` also
 - **Glare that stays.** Glare stays where no frame of the spread shows the ink.
   Black header bars keep a gold tint on about 5 pages. Example: the left half of
   the header "SAFETY PRECAUTIONS/WARNINGS" (page 13 of the result).
+- **A thin band under a sharp fold keeps a light tint.** A folded letter on a
+  wooden table has orange shadows under the folds. Decision 0033 takes most of
+  them away: 5 % of the page has a tint, before 14 % to 18 %. The paper colour of
+  a cell is the mean of 3 x 3 cells, so the bright cells above a fold make the
+  first cells below it too bright. A shadow more than 20 % below the paper, or
+  with more red, stays too.
 - **Soft patches.** A repaired region can be a little less sharp than the text
   around it, when the best donor is less sharp than the reference.
 - **Text below a finger.** The paint removes a finger that is in all frames, and

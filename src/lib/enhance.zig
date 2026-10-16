@@ -8,6 +8,9 @@
 //!   the cells gives the illumination; the image divided by it has white paper.
 //! - ScanTailor (J. Artsimovich), `EstimateBackground`: a polynomial surface as the
 //!   background, with dark cells rejected. No ScanTailor code is used.
+//!
+//! The rule for a shadow that the surface cannot follow is new (decision 0033): a
+//! group of dark cells that fades into the paper keeps its own paper colour.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -29,6 +32,25 @@ pub const Options = struct {
     paper_percentile: f32 = 0.75,
     /// A cell is paper when its colour is within this distance below the fitted surface.
     paper_tolerance: f32 = 0.06,
+    /// Take a group of cells in a shadow for paper (`acceptShadows`, decision 0033).
+    accept_shadows: bool = true,
+    /// A cell further below the surface is paper in a shadow when it is at most this
+    /// fraction darker than the surface (decision 0033). Skin in the light is 0.2 to
+    /// 0.35 darker.
+    shadow_depth: f32 = 0.2,
+    /// And when its red is above its green by less than this, on the scale where the
+    /// surface is 1.0. The skin test of `finger.Options.min_red_over_green` starts
+    /// at this value. The warm shadows of a letter on a wooden table have 0.03 to
+    /// 0.08.
+    shadow_max_red: f32 = 0.08,
+    /// And when the median luma of the cell is at least this fraction of the luma
+    /// of its paper colour: most of the cell shows the paper.
+    shadow_min_median: f32 = 0.95,
+    /// A group of such cells is a shadow when it fades into the paper at one place at
+    /// least: a cell of the group is at most this much below the paper cell two
+    /// cells away, with a paper cell between them. The edge of print falls within
+    /// one cell. The unit is the one of `paper_tolerance`.
+    shadow_edge_step: f32 = 0.03,
     /// The limits of the correction factor of a pixel.
     min_gain: f32 = 0.7,
     max_gain: f32 = 2.5,
@@ -123,6 +145,8 @@ fn estimateBackground(allocator: Allocator, page: RgbF32, options: Options) Allo
         .cell_px = cell_px,
     };
     errdefer background.deinit(allocator);
+    const mostly_paper = try allocator.alloc(bool, grid_width * grid_height);
+    defer allocator.free(mostly_paper);
 
     // The colour of each cell: the mean of its brightest pixels.
     for (0..grid_height) |cell_y| {
@@ -133,10 +157,13 @@ fn estimateBackground(allocator: Allocator, page: RgbF32, options: Options) Allo
             const y_end = @min(y_start + cell_px, page.height);
 
             var bins: [luma_bins]u32 = @splat(0);
+            var fine_bins: [median_bins]u32 = @splat(0);
             var total: u32 = 0;
             for (y_start..y_end) |y| {
                 for (x_start..x_end) |x| {
-                    bins[lumaBin(color.rgbLuma(page.pixel(x, y).*))] += 1;
+                    const luma = color.rgbLuma(page.pixel(x, y).*);
+                    bins[lumaBin(luma)] += 1;
+                    fine_bins[medianBin(luma)] += 1;
                     total += 1;
                 }
             }
@@ -162,6 +189,15 @@ fn estimateBackground(allocator: Allocator, page: RgbF32, options: Options) Allo
             }
             const cell = background.at(cell_x, cell_y);
             for (0..channels) |channel| cell[channel] = @floatCast(sum[channel] / @max(count, 1));
+
+            // The bin of the median luma.
+            var median_bin: usize = median_bins - 1;
+            var upper: u32 = fine_bins[median_bin];
+            while (2 * upper < total and median_bin > 0) {
+                median_bin -= 1;
+                upper += fine_bins[median_bin];
+            }
+            mostly_paper[cell_y * grid_width + cell_x] = medianBinLuma(median_bin) >= options.shadow_min_median * color.rgbLuma(cell.*);
         }
     }
 
@@ -215,6 +251,8 @@ fn estimateBackground(allocator: Allocator, page: RgbF32, options: Options) Allo
         }
     }
 
+    if (have_surface and options.accept_shadows) try acceptShadows(allocator, background, is_paper, mostly_paper, &coefficients, options);
+
     // Cells that are not paper take the value of the surface.
     if (have_surface) {
         for (0..grid_height) |cell_y| {
@@ -234,6 +272,116 @@ fn estimateBackground(allocator: Allocator, page: RgbF32, options: Options) Allo
     return background;
 }
 
+/// Mark the cells in a shadow as paper, so that they keep their own colour
+/// (decision 0033). A fold or a wave of the sheet gives a shadow with steps that the
+/// surface cannot follow, and the light from a desk gives the shadow a colour. The
+/// division by the colour of the cell then takes away the shadow and its colour.
+///
+/// A cell that is not paper can be in a shadow when:
+/// - its colour is at most `shadow_depth` below the surface, and it has not much
+///   more red than green. Skin, and the wood of a desk, have more red.
+/// - most of its pixels have its colour (`mostly_paper`). Text in a shadow covers
+///   a small part of a cell. A dark bar with white letters has its brightest
+///   pixels in the letters, and most of its pixels are dark.
+///
+/// A group of such cells, side by side, is a shadow when it fades into the paper at
+/// one place at least (`shadow_edge_step`). A printed area with the colour of a
+/// shadow, for example a grey box, has a sharp edge all around: from the area to the
+/// paper two cells away, the step is the full depth of the area. The cell between
+/// them can hold a part of each, so the test skips it.
+fn acceptShadows(
+    allocator: Allocator,
+    background: Background,
+    is_paper: []bool,
+    mostly_paper: []const bool,
+    coefficients: *const [channels][surface_terms]f64,
+    options: Options,
+) Allocator.Error!void {
+    const width = background.grid_width;
+    const height = background.grid_height;
+    const count = is_paper.len;
+
+    // For each cell: its green below the surface, on the scale of the cells, and
+    // whether it can be in a shadow.
+    const below = try allocator.alloc(f32, count);
+    defer allocator.free(below);
+    const can_be_shadow = try allocator.alloc(bool, count);
+    defer allocator.free(can_be_shadow);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const index = y * width + x;
+            const terms = surfaceTerms(normalized(x, width), normalized(y, height));
+            const cell = background.at(x, y);
+            var predicted: [channels]f32 = undefined;
+            for (&predicted, coefficients) |*value, channel_terms| {
+                var sum: f64 = 0;
+                for (channel_terms, terms) |coefficient, term| sum += coefficient * term;
+                value.* = @max(@as(f32, @floatCast(sum)), min_background);
+            }
+            below[index] = predicted[1] - cell[1];
+            // The colour of the cell on the scale where the surface is 1.0.
+            const red = cell[0] / predicted[0];
+            const green = cell[1] / predicted[1];
+            can_be_shadow[index] = !is_paper[index] and mostly_paper[index] and
+                green < 1 and green >= 1 - options.shadow_depth and
+                red - green < options.shadow_max_red;
+        }
+    }
+
+    // The groups of such cells. `order` holds the cells of each group one after the
+    // other. The groups mark `in_shadow`, so that a group does not see the cells
+    // of another group as paper.
+    const seen = try allocator.alloc(bool, count);
+    defer allocator.free(seen);
+    @memset(seen, false);
+    const in_shadow = try allocator.alloc(bool, count);
+    defer allocator.free(in_shadow);
+    @memset(in_shadow, false);
+    const order = try allocator.alloc(usize, count);
+    defer allocator.free(order);
+    const directions = [_][2]isize{ .{ -1, 0 }, .{ 1, 0 }, .{ 0, -1 }, .{ 0, 1 } };
+    var end: usize = 0;
+    for (0..count) |seed| {
+        if (!can_be_shadow[seed] or seen[seed]) continue;
+        const begin = end;
+        seen[seed] = true;
+        order[end] = seed;
+        end += 1;
+        var fades = false;
+        var next = begin;
+        while (next < end) : (next += 1) {
+            const index = order[next];
+            const x = index % width;
+            const y = index / width;
+            for (directions) |direction| {
+                const near = cellAt(width, height, x, y, direction, 1) orelse continue;
+                if (is_paper[near]) {
+                    const far = cellAt(width, height, x, y, direction, 2) orelse continue;
+                    if (is_paper[far] and below[index] - below[far] <= options.shadow_edge_step) fades = true;
+                    continue;
+                }
+                if (seen[near] or !can_be_shadow[near]) continue;
+                seen[near] = true;
+                order[end] = near;
+                end += 1;
+            }
+        }
+        if (fades) {
+            for (order[begin..end]) |index| in_shadow[index] = true;
+        }
+    }
+    for (is_paper, in_shadow) |*paper, shadow| paper.* = paper.* or shadow;
+}
+
+/// The index of the cell `distance` cells from (x, y) in `direction`, or null
+/// outside the grid.
+fn cellAt(width: usize, height: usize, x: usize, y: usize, direction: [2]isize, distance: isize) ?usize {
+    const cell_x = @as(isize, @intCast(x)) + direction[0] * distance;
+    const cell_y = @as(isize, @intCast(y)) + direction[1] * distance;
+    if (cell_x < 0 or cell_y < 0 or cell_x >= width or cell_y >= height) return null;
+    return @as(usize, @intCast(cell_y)) * width + @as(usize, @intCast(cell_x));
+}
+
 /// The smallest background value. It keeps the division finite.
 const min_background = 0.05;
 
@@ -241,6 +389,21 @@ fn lumaBin(luma: f32) usize {
     const scaled = luma / luma_bin_range * luma_bins;
     if (!(scaled > 0)) return 0;
     return @min(luma_bins - 1, @as(usize, @intFromFloat(scaled)));
+}
+
+/// The median of a cell needs finer bins than the brightest part: the test of
+/// `shadow_min_median` compares it with the paper colour within a few per cent.
+const median_bins = 240;
+
+fn medianBin(luma: f32) usize {
+    const scaled = luma / luma_bin_range * median_bins;
+    if (!(scaled > 0)) return 0;
+    return @min(median_bins - 1, @as(usize, @intFromFloat(scaled)));
+}
+
+/// The luma at the center of a bin of `medianBin`.
+fn medianBinLuma(bin: usize) f32 {
+    return (@as(f32, @floatFromInt(bin)) + 0.5) * luma_bin_range / median_bins;
 }
 
 /// The cell index as a coordinate in -1..1.
@@ -506,6 +669,61 @@ test "enhance makes the paper white and even" {
     const ink = page.pixel(100, 140);
     try testing.expect(ink[0] < 0.3);
     try testing.expectApproxEqAbs(ink[0], ink[2], 0.03);
+}
+
+test "the flatten takes a warm shadow away and keeps a grey box and skin" {
+    // Warm light; a cell is 12 pixels.
+    const light = [channels]f32{ 0.8, 0.74, 0.68 };
+    // Three streaks of shadow that hang from a fold, in the warm light of a desk: a
+    // wave of the sheet. A streak is dark for 4 cells below the fold, and then it
+    // fades out over 10 cells. A smooth surface cannot follow the streaks.
+    const shadow = [channels]f32{ 0.09, 0.15, 0.2 };
+    const streaks = [_][2]usize{ .{ 16, 64 }, .{ 112, 160 }, .{ 200, 240 } };
+    const fold_y = 120;
+    const fade_y = 168;
+    const fade_height = 120;
+    const grey_box = [channels]f32{ 0.85, 0.85, 0.85 };
+    // Just darker than the limit of the paper: an even fill, with no fade.
+    const light_fill = [channels]f32{ 0.9, 0.9, 0.9 };
+    const skin = [channels]f32{ 0.85, 0.62, 0.5 };
+    const page = try RgbF32.init(testing.allocator, 256, 320);
+    defer page.deinit(testing.allocator);
+    for (0..page.height) |y| {
+        const into_fade: f32 = @floatFromInt(@max(@as(isize, @intCast(y)) - fade_y, 0));
+        const strength: f32 = if (y >= fold_y) @max(0, 1 - into_fade / fade_height) else 0;
+        for (0..page.width) |x| {
+            const in_box = x >= 140 and x < 212 and y >= 20 and y < 92;
+            const in_fill = x >= 20 and x < 104 and y >= 40 and y < 64;
+            const in_skin = x >= 100 and x < 160 and y >= 296;
+            var tone: [channels]f32 = @splat(1);
+            if (in_box) tone = grey_box;
+            if (in_fill) tone = light_fill;
+            if (in_skin) tone = skin;
+            var in_streak = false;
+            for (streaks) |streak| in_streak = in_streak or (x >= streak[0] and x < streak[1]);
+            if (in_streak and strength > 0 and !in_skin) {
+                for (&tone, shadow) |*value, dark| value.* = 1 - dark * strength;
+            }
+            for (page.pixel(x, y), tone, light) |*value, part, lamp| value.* = part * lamp;
+        }
+    }
+    try flatten(testing.allocator, page, .{});
+
+    // The paper in the shadow is white and neutral.
+    for ([_]usize{ 40, 136, 220 }) |x| {
+        const paper = page.pixel(x, 144);
+        for (paper) |value| try testing.expect(value > 0.97);
+        try testing.expectApproxEqAbs(paper[0], paper[2], 0.02);
+    }
+    // The grey box has a sharp edge all around: it stays grey.
+    const box = page.pixel(176, 56);
+    for (box) |value| try testing.expect(value < 0.9);
+    // The light fill is even: it stays grey too.
+    const fill = page.pixel(62, 52);
+    for (fill) |value| try testing.expect(value < 0.95);
+    // The skin is too red and too dark for a shadow: it keeps its colour.
+    const finger = page.pixel(130, 310);
+    try testing.expect(finger[0] - finger[1] > 0.15);
 }
 
 test "a blank page stays blank" {
